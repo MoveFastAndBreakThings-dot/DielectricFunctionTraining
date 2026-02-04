@@ -1,0 +1,7 @@
+pymatgen
+torch
+mp_api
+scikit-learn
+scipy
+numpy
+matplotlib
