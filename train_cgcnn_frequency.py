@@ -15,6 +15,12 @@ from torch.utils.data import DataLoader, Subset
 from cgcnn_model import FrequencyCGCNN
 from lmdb_dataset import LMDBCrystalDataset, collate_pool
 
+# ============================================================================
+# CHANGE MODEL NAME HERE
+# ============================================================================
+MODEL_NAME = "cgcnn_kkr_v1"
+# ============================================================================
+
 
 def train_epoch(model, dataloader, criterion, optimizer, device):
     """Train for one epoch."""
@@ -187,8 +193,10 @@ def main():
     best_val_loss = float('inf')
     train_losses = []
     val_losses = []
+    model_path = f"models/{MODEL_NAME}.pt"
     
-    print("\nStarting training...")
+    print(f"\nModel will be saved to: {model_path}")
+    print("Starting training...")
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
@@ -217,15 +225,16 @@ def main():
                 'train_idx': train_idx,
                 'val_idx': val_idx,
                 'test_idx': test_idx,
-            }, 'best_cgcnn_kkr_model.pt')
+                'model_name': MODEL_NAME,
+            }, model_path)
             print(f"  -> Saved best model (val_loss: {val_loss:.6f})")
     
     # Plot losses
-    plot_losses(train_losses, val_losses)
+    plot_losses(train_losses, val_losses, save_path=f"models/{MODEL_NAME}_loss.png")
     
     # Final evaluation
     print("\nEvaluating on test set...")
-    checkpoint = torch.load('best_cgcnn_kkr_model.pt')
+    checkpoint = torch.load(model_path)
     model.load_state_dict(checkpoint['model_state_dict'])
     test_loss = validate(model, test_loader, criterion, device)
     print(f"Final Test Loss: {test_loss:.6f}")

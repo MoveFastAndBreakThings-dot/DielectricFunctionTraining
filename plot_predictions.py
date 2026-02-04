@@ -10,10 +10,18 @@ import matplotlib.pyplot as plt
 from lmdb_dataset import LMDBCrystalDataset, collate_pool
 from cgcnn_model import FrequencyCGCNN
 
+# ============================================================================
+# CHANGE MODEL NAME HERE
+# ============================================================================
+MODEL_NAME = "cgcnn_kkr_v1"
+# ============================================================================
+
 os.makedirs('plots', exist_ok=True)
 
 # Load model
-checkpoint = torch.load('best_cgcnn_kkr_model.pt', map_location='cpu')
+model_path = f"models/{MODEL_NAME}.pt"
+print(f"Loading model from: {model_path}")
+checkpoint = torch.load(model_path, map_location='cpu')
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 dataset = LMDBCrystalDataset('processed_data/crystal_graphs.lmdb', use_kkr=True)
