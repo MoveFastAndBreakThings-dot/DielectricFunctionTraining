@@ -15,6 +15,33 @@ from torch.utils.data import DataLoader, Subset
 from cgcnn_model import FrequencyCGCNN
 from lmdb_dataset import LMDBCrystalDataset, collate_pool
 
+
+class FrequencyWeightedMSELoss(nn.Module):
+    """
+    Weighted MSE loss: Loss = mean( exp(-xi/A) * (pred - true)^2 )
+    
+    Lower frequencies (small xi) get weight ~1, higher frequencies decay exponentially.
+    This allows less accuracy at high frequencies where it matters less.
+    """
+    
+    def __init__(self, xi_array, decay_scale=None):
+        super().__init__()
+        xi = torch.tensor(xi_array, dtype=torch.float32)
+        # Default: decay_scale A = median of xi values (reasonable default)
+        if decay_scale is None:
+            decay_scale = float(torch.median(xi))
+        weights = torch.exp(-xi / decay_scale)
+        # Normalize so weights sum to n_frequencies (keeps loss scale similar to MSE)
+        weights = weights * len(xi) / weights.sum()
+        self.register_buffer('weights', weights)
+    
+    def forward(self, pred, target):
+        # pred, target shape: (batch, n_channels, n_frequencies)
+        squared_error = (pred - target) ** 2
+        # weights shape: (n_frequencies,) -> broadcast over batch and channels
+        weighted_error = squared_error * self.weights
+        return weighted_error.mean()
+
 # ============================================================================
 # CHANGE MODEL NAME HERE
 # ============================================================================
@@ -182,8 +209,8 @@ def main():
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    # Training setup
-    criterion = nn.MSELoss()
+    # Training setup - frequency-weighted loss (low freq weighted more than high freq)
+    criterion = FrequencyWeightedMSELoss(dataset.frequency_array).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=10
