@@ -196,7 +196,7 @@ class FrequencyCGCNN(nn.Module):
     """
     def __init__(self, orig_atom_fea_len, nbr_fea_len,
                  atom_fea_len=64, n_conv=3, h_fea_len=128,
-                 n_h=1, n_frequencies=4999, n_output_channels=2):
+                 n_h=1, n_frequencies=4999, n_output_channels=2, dropout=0.1):
         """
         Initialize FrequencyCGCNN.
 
@@ -245,10 +245,10 @@ class FrequencyCGCNN(nn.Module):
         self.fc_freq = nn.Sequential(
             nn.Linear(h_fea_len, h_fea_len * 2),
             nn.Softplus(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(h_fea_len * 2, h_fea_len * 2),
             nn.Softplus(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(h_fea_len * 2, n_frequencies * n_output_channels)
         )
         

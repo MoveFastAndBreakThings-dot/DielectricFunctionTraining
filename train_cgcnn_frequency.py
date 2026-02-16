@@ -27,7 +27,7 @@ MODEL_NAME = "cgcnn_kkr_v2"
 # ============================================================================
 
 
-def train_epoch(model, dataloader, criterion, optimizer, device, use_log=False):
+def train_epoch(model, dataloader, criterion, optimizer, device, use_log=False, grad_clip_norm=1.0):
     """Train for one epoch."""
     model.train()
     total_loss = 0.0
@@ -48,13 +48,13 @@ def train_epoch(model, dataloader, criterion, optimizer, device, use_log=False):
         output = model(atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx)
         loss = criterion(output, target)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
         optimizer.step()
         
         total_loss += loss.item() * target.shape[0]
         n_samples += target.shape[0]
         
-        if batch_idx % 10 == 0:
+        if batch_idx % 10 == 0 and not hasattr(train_epoch, '_suppress_output'):
             print(f'  Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.6f}')
     
     return total_loss / n_samples
@@ -138,6 +138,22 @@ def main():
                         help='Dielectric components to predict (comma-separated: xx,yy,zz)')
     parser.add_argument('--use_log', action='store_true',
                         help='Train in log-space (predict log(ε), better for high dynamic range)')
+    
+    # Model architecture hyperparameters
+    parser.add_argument('--atom_fea_len', type=int, default=64)
+    parser.add_argument('--n_conv', type=int, default=3)
+    parser.add_argument('--h_fea_len', type=int, default=128)
+    parser.add_argument('--n_h', type=int, default=1)
+    parser.add_argument('--dropout', type=float, default=0.1)
+    
+    # Training hyperparameters
+    parser.add_argument('--weight_decay', type=float, default=1e-5)
+    parser.add_argument('--grad_clip_norm', type=float, default=1.0)
+    
+    # Scheduler hyperparameters
+    parser.add_argument('--scheduler_factor', type=float, default=0.5)
+    parser.add_argument('--scheduler_patience', type=int, default=10)
+    
     args = parser.parse_args()
     
     target_components = tuple(args.target_components.split(','))
@@ -187,21 +203,22 @@ def main():
     model = FrequencyCGCNN(
         orig_atom_fea_len=orig_atom_fea_len,
         nbr_fea_len=nbr_fea_len,
-        atom_fea_len=64,
-        n_conv=3,
-        h_fea_len=128,
-        n_h=1,
+        atom_fea_len=args.atom_fea_len,
+        n_conv=args.n_conv,
+        h_fea_len=args.h_fea_len,
+        n_h=args.n_h,
         n_frequencies=n_frequencies,
-        n_output_channels=n_output_channels
+        n_output_channels=n_output_channels,
+        dropout=args.dropout
     ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Training setup - frequency-weighted loss (low freq weighted more than high freq)
     criterion = FrequencyWeightedMSELoss(dataset.frequency_array).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=10
+        optimizer, mode='min', factor=args.scheduler_factor, patience=args.scheduler_patience
     )
     
     # Training loop
@@ -214,7 +231,8 @@ def main():
     print("Starting training...")
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
-        train_loss = train_epoch(model, train_loader, criterion, optimizer, device, use_log=args.use_log)
+        train_loss = train_epoch(model, train_loader, criterion, optimizer, device, 
+                                use_log=args.use_log, grad_clip_norm=args.grad_clip_norm)
         val_loss = validate(model, val_loader, criterion, device, use_log=args.use_log)
         scheduler.step(val_loss)
         
@@ -241,7 +259,17 @@ def main():
                 'val_idx': val_idx,
                 'test_idx': test_idx,
                 'model_name': MODEL_NAME,
-                'use_log': args.use_log,  # Important: save this for inference
+                'use_log': args.use_log,
+                # Hyperparameters
+                'atom_fea_len': args.atom_fea_len,
+                'n_conv': args.n_conv,
+                'h_fea_len': args.h_fea_len,
+                'n_h': args.n_h,
+                'dropout': args.dropout,
+                'weight_decay': args.weight_decay,
+                'grad_clip_norm': args.grad_clip_norm,
+                'scheduler_factor': args.scheduler_factor,
+                'scheduler_patience': args.scheduler_patience,
             }, model_path)
             print(f"  -> Saved best model (val_loss: {val_loss:.6f})")
     
