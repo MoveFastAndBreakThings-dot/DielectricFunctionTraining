@@ -1,40 +1,29 @@
 """
 Detailed analysis of test set predictions.
 Identifies outliers and provides breakdown by loss ranges.
+Handles both log-space and direct prediction models.
 """
 
 import os
 import torch
-import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from lmdb_dataset import LMDBCrystalDataset, collate_pool
 from cgcnn_model import FrequencyCGCNN
+from losses import FrequencyWeightedMSELoss
 
 
-class FrequencyWeightedMSELoss(nn.Module):
-    def __init__(self, xi_array, decay_scale=None):
-        super().__init__()
-        xi = torch.tensor(xi_array, dtype=torch.float32)
-        if decay_scale is None:
-            decay_scale = float(torch.median(xi))
-        weights = torch.exp(-xi / decay_scale)
-        weights = weights * len(xi) / weights.sum()
-        self.register_buffer('weights', weights)
-    
-    def forward(self, pred, target):
-        squared_error = (pred - target) ** 2
-        weighted_error = squared_error * self.weights
-        return weighted_error.mean()
-
-
-MODEL_NAME = "cgcnn_kkr_v1"
+MODEL_NAME = "cgcnn_kkr_v2"
 
 # Load model and dataset
 model_path = f"models/{MODEL_NAME}.pt"
 print(f"Loading model from: {model_path}")
 checkpoint = torch.load(model_path, map_location='cpu')
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Check if model was trained in log-space
+use_log = checkpoint.get('use_log', False)
+print(f"Log-space model: {use_log}")
 
 dataset = LMDBCrystalDataset('processed_data/crystal_graphs.lmdb', use_kkr=True)
 
@@ -80,9 +69,16 @@ for idx in test_indices:
             crystal_atom_idx
         )
     
-    loss = criterion(pred.to(device), tgt.to(device)).item()
+    # Convert prediction back to real-space if model was trained in log-space
+    if use_log:
+        pred_real = torch.exp(pred)
+    else:
+        pred_real = pred
+    
+    # Loss computed in real-space for fair comparison
+    loss = criterion(pred_real.to(device), tgt.to(device)).item()
     actual = tgt[0, 0].numpy()  # kkr_xx
-    predicted = pred[0, 0].cpu().numpy()
+    predicted = pred_real[0, 0].cpu().numpy()
     results.append({
         'idx': idx,
         'mpid': info['mpid'],

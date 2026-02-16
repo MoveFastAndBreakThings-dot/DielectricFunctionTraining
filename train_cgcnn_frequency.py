@@ -4,6 +4,10 @@ Train CGCNN model to predict KKR-transformed dielectric function ε(iξ).
 Usage:
     1. First run: python preprocess_dataset.py --input_dir data --output_dir processed_data
     2. Then run: python train_cgcnn_frequency.py
+
+Log-space training:
+    Use --use_log to train in log-space. This predicts log(ε) and transforms
+    back to real values via exp() for evaluation. Helps with high dynamic range.
 """
 
 import argparse
@@ -14,42 +18,16 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, Subset
 from cgcnn_model import FrequencyCGCNN
 from lmdb_dataset import LMDBCrystalDataset, collate_pool
-
-
-class FrequencyWeightedMSELoss(nn.Module):
-    """
-    Weighted MSE loss: Loss = mean( exp(-xi/A) * (pred - true)^2 )
-    
-    Lower frequencies (small xi) get weight ~1, higher frequencies decay exponentially.
-    This allows less accuracy at high frequencies where it matters less.
-    """
-    
-    def __init__(self, xi_array, decay_scale=None):
-        super().__init__()
-        xi = torch.tensor(xi_array, dtype=torch.float32)
-        # Default: decay_scale A = median of xi values (reasonable default)
-        if decay_scale is None:
-            decay_scale = float(torch.median(xi))
-        weights = torch.exp(-xi / decay_scale)
-        # Normalize so weights sum to n_frequencies (keeps loss scale similar to MSE)
-        weights = weights * len(xi) / weights.sum()
-        self.register_buffer('weights', weights)
-    
-    def forward(self, pred, target):
-        # pred, target shape: (batch, n_channels, n_frequencies)
-        squared_error = (pred - target) ** 2
-        # weights shape: (n_frequencies,) -> broadcast over batch and channels
-        weighted_error = squared_error * self.weights
-        return weighted_error.mean()
+from losses import FrequencyWeightedMSELoss
 
 # ============================================================================
 # CHANGE MODEL NAME HERE
 # ============================================================================
-MODEL_NAME = "cgcnn_kkr_v1"
+MODEL_NAME = "cgcnn_kkr_v2"
 # ============================================================================
 
 
-def train_epoch(model, dataloader, criterion, optimizer, device):
+def train_epoch(model, dataloader, criterion, optimizer, device, use_log=False):
     """Train for one epoch."""
     model.train()
     total_loss = 0.0
@@ -61,6 +39,10 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         nbr_fea = nbr_fea.to(device)
         nbr_fea_idx = nbr_fea_idx.to(device)
         target = target.to(device)
+        
+        # Transform target to log-space if enabled
+        if use_log:
+            target = torch.log(target)
         
         optimizer.zero_grad()
         output = model(atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx)
@@ -78,7 +60,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
     return total_loss / n_samples
 
 
-def validate(model, dataloader, criterion, device):
+def validate(model, dataloader, criterion, device, use_log=False):
     """Validate the model."""
     model.eval()
     total_loss = 0.0
@@ -91,6 +73,9 @@ def validate(model, dataloader, criterion, device):
             nbr_fea = nbr_fea.to(device)
             nbr_fea_idx = nbr_fea_idx.to(device)
             target = target.to(device)
+            
+            if use_log:
+                target = torch.log(target)
             
             output = model(atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx)
             loss = criterion(output, target)
@@ -151,6 +136,8 @@ def main():
     parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--target_components', type=str, default='xx',
                         help='Dielectric components to predict (comma-separated: xx,yy,zz)')
+    parser.add_argument('--use_log', action='store_true',
+                        help='Train in log-space (predict log(ε), better for high dynamic range)')
     args = parser.parse_args()
     
     target_components = tuple(args.target_components.split(','))
@@ -167,6 +154,7 @@ def main():
     print(f"ξ points: {dataset.n_frequencies}")
     print(f"Target components: {target_components}")
     print(f"Output channels: {dataset.get_output_channels()}")
+    print(f"Log-space training: {args.use_log}")
     
     # Split into train/val/test
     train_idx, val_idx, test_idx = train_val_test_split(len(dataset))
@@ -226,8 +214,8 @@ def main():
     print("Starting training...")
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
-        train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss = validate(model, val_loader, criterion, device)
+        train_loss = train_epoch(model, train_loader, criterion, optimizer, device, use_log=args.use_log)
+        val_loss = validate(model, val_loader, criterion, device, use_log=args.use_log)
         scheduler.step(val_loss)
         
         train_losses.append(train_loss)
@@ -253,6 +241,7 @@ def main():
                 'val_idx': val_idx,
                 'test_idx': test_idx,
                 'model_name': MODEL_NAME,
+                'use_log': args.use_log,  # Important: save this for inference
             }, model_path)
             print(f"  -> Saved best model (val_loss: {val_loss:.6f})")
     
@@ -263,8 +252,8 @@ def main():
     print("\nEvaluating on test set...")
     checkpoint = torch.load(model_path)
     model.load_state_dict(checkpoint['model_state_dict'])
-    test_loss = validate(model, test_loader, criterion, device)
-    print(f"Final Test Loss: {test_loss:.6f}")
+    test_loss = validate(model, test_loader, criterion, device, use_log=args.use_log)
+    print(f"Final Test Loss (log-space): {test_loss:.6f}" if args.use_log else f"Final Test Loss: {test_loss:.6f}")
     
     dataset.close()
 

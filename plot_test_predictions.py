@@ -5,38 +5,16 @@ Saves each plot to plots/ folder and creates a loss distribution histogram.
 
 import os
 import torch
-import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from lmdb_dataset import LMDBCrystalDataset, collate_pool
 from cgcnn_model import FrequencyCGCNN
-
-
-class FrequencyWeightedMSELoss(nn.Module):
-    """
-    Weighted MSE loss: Loss = mean( exp(-xi/A) * (pred - true)^2 )
-    
-    Lower frequencies (small xi) get weight ~1, higher frequencies decay exponentially.
-    """
-    
-    def __init__(self, xi_array, decay_scale=None):
-        super().__init__()
-        xi = torch.tensor(xi_array, dtype=torch.float32)
-        if decay_scale is None:
-            decay_scale = float(torch.median(xi))
-        weights = torch.exp(-xi / decay_scale)
-        weights = weights * len(xi) / weights.sum()
-        self.register_buffer('weights', weights)
-    
-    def forward(self, pred, target):
-        squared_error = (pred - target) ** 2
-        weighted_error = squared_error * self.weights
-        return weighted_error.mean()
+from losses import FrequencyWeightedMSELoss
 
 # ============================================================================
 # CHANGE MODEL NAME HERE
 # ============================================================================
-MODEL_NAME = "cgcnn_kkr_v1"
+MODEL_NAME = "cgcnn_kkr_v2"
 # ============================================================================
 
 os.makedirs('plots', exist_ok=True)
@@ -46,6 +24,10 @@ model_path = f"models/{MODEL_NAME}.pt"
 print(f"Loading model from: {model_path}")
 checkpoint = torch.load(model_path, map_location='cpu')
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Check if model was trained in log-space
+use_log = checkpoint.get('use_log', False)
+print(f"Log-space model: {use_log}")
 
 dataset = LMDBCrystalDataset('processed_data/crystal_graphs.lmdb', use_kkr=True)
 
@@ -101,11 +83,17 @@ for i, idx in enumerate(test_indices):
             crystal_atom_idx
         )
     
-    actual = target[0]  # kkr_xx
-    predicted = pred[0, 0].cpu().numpy()
+    # Convert prediction back to real-space if model was trained in log-space
+    if use_log:
+        pred_real = torch.exp(pred)
+    else:
+        pred_real = pred
     
-    # Calculate loss (same as training)
-    loss = criterion(pred.to(device), tgt.to(device)).item()
+    actual = target[0]  # kkr_xx
+    predicted = pred_real[0, 0].cpu().numpy()
+    
+    # Calculate loss in real-space
+    loss = criterion(pred_real.to(device), tgt.to(device)).item()
     loss_values.append(loss)
     mpids.append(info['mpid'])
     
