@@ -131,20 +131,20 @@ def main():
     parser = argparse.ArgumentParser(description='Train FrequencyCGCNN on KKR data')
     parser.add_argument('--lmdb_path', type=str, default='processed_data/crystal_graphs.lmdb',
                         help='Path to LMDB database')
-    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--lr', type=float, default=0.001)
+    parser.add_argument('--lr', type=float, default=0.000129)
     parser.add_argument('--target_components', type=str, default='xx',
                         help='Dielectric components to predict (comma-separated: xx,yy,zz)')
     parser.add_argument('--use_log', action='store_true',
                         help='Train in log-space (predict log(ε), better for high dynamic range)')
     
-    # Model architecture hyperparameters
-    parser.add_argument('--atom_fea_len', type=int, default=64)
-    parser.add_argument('--n_conv', type=int, default=3)
+    # Model architecture hyperparameters (defaults from Trial 28 - best performing)
+    parser.add_argument('--atom_fea_len', type=int, default=128)
+    parser.add_argument('--n_conv', type=int, default=4)
     parser.add_argument('--h_fea_len', type=int, default=128)
     parser.add_argument('--n_h', type=int, default=1)
-    parser.add_argument('--dropout', type=float, default=0.1)
+    parser.add_argument('--dropout', type=float, default=0.2)
     
     # Training hyperparameters
     parser.add_argument('--weight_decay', type=float, default=1e-5)
