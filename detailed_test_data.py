@@ -9,7 +9,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from lmdb_dataset import LMDBCrystalDataset, collate_pool
-from cgcnn_model import FrequencyCGCNN
+from model_loader import load_model
 from losses import FrequencyWeightedMSELoss
 
 
@@ -28,26 +28,9 @@ print("All losses will be computed in real-space (non-logged)")
 
 dataset = LMDBCrystalDataset('processed_data/crystal_graphs.lmdb', use_kkr=True)
 
-# Get hyperparameters from checkpoint (use defaults if not saved in older checkpoints)
-atom_fea_len = checkpoint.get('atom_fea_len', 64)
-n_conv = checkpoint.get('n_conv', 3)
-h_fea_len = checkpoint.get('h_fea_len', 128)
-n_h = checkpoint.get('n_h', 1)
-dropout = checkpoint.get('dropout', 0.1)
-
-model = FrequencyCGCNN(
-    orig_atom_fea_len=checkpoint['orig_atom_fea_len'],
-    nbr_fea_len=checkpoint['nbr_fea_len'],
-    atom_fea_len=atom_fea_len,
-    n_conv=n_conv,
-    h_fea_len=h_fea_len,
-    n_h=n_h,
-    n_frequencies=checkpoint['n_frequencies'],
-    n_output_channels=checkpoint['n_output_channels'],
-    dropout=dropout
-).to(device)
-model.load_state_dict(checkpoint['model_state_dict'])
-model.eval()
+# Load model (automatically detects type)
+model, model_type = load_model(checkpoint, device)
+print(f"Model type: {model_type}")
 
 # Use centralized loss function - always compute in real-space
 criterion = FrequencyWeightedMSELoss(dataset.frequency_array).to(device)

@@ -25,7 +25,5 @@ class FrequencyWeightedMSELoss(nn.Module):
         self.register_buffer('weights', weights)
     
     def forward(self, pred, target):
-        squared_error = (pred - target) ** 2
-        weighted_error = squared_error * self.weights
-        return weighted_error.mean()
-
+        abs_error = torch.abs(pred - target)
+        return abs_error.mean()

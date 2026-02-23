@@ -23,28 +23,34 @@ def objective(trial, dataset, device, epochs, use_log=True):
     """
     
     # Suggest hyperparameters
-    # High priority
-    lr = trial.suggest_float('lr', 1e-4, 5e-3, log=True)
-    atom_fea_len = trial.suggest_categorical('atom_fea_len', [64, 128])
-    h_fea_len = trial.suggest_categorical('h_fea_len', [128, 256])
-    n_conv = trial.suggest_categorical('n_conv', [3, 4])
-    dropout = trial.suggest_categorical('dropout', [0.1, 0.2])
+    # Starting from current defaults, exploring deeper networks and better regularization
+    # Current defaults: lr=0.000129, atom_fea_len=128, n_conv=4, h_fea_len=128, 
+    # dropout=0.2, batch_size=16, weight_decay=1e-5, n_h=1, scheduler_factor=0.5, 
+    # scheduler_patience=10, grad_clip_norm=1.0
     
-    # Medium priority
-    batch_size = trial.suggest_categorical('batch_size', [4, 8, 16])
-    weight_decay = trial.suggest_categorical('weight_decay', [1e-5, 1e-4])
-    n_h = trial.suggest_categorical('n_h', [1, 2])
+    # Learning rate: lower range since slower LR helps generalization
+    lr = trial.suggest_float('lr', 1e-6, 2e-3, log=True)
     
-    # Scheduler and training
-    scheduler_patience = trial.suggest_categorical('scheduler_patience', [5, 10, 15])
-    scheduler_factor = trial.suggest_categorical('scheduler_factor', [0.3, 0.5, 0.7])
-    grad_clip_norm = trial.suggest_categorical('grad_clip_norm', [0.5, 1.0, 2.0])
+    # Architecture: explore deeper networks (more n_conv, larger atom_fea_len)
+    atom_fea_len = trial.suggest_categorical('atom_fea_len', [128, 192, 256])
+    n_conv = trial.suggest_categorical('n_conv', [4, 5, 6])
+    
+    # Regularization: higher dropout to address overfitting
+    dropout = trial.suggest_categorical('dropout', [0.2, 0.3, 0.4, 0.5])
+    # Higher weight_decay for better regularization against overfitting
+    weight_decay = trial.suggest_categorical('weight_decay', [1e-5, 1e-4, 1e-3])
+    
+    # Fixed to defaults (less critical)
+    h_fea_len = 128
+    batch_size = 16
+    n_h = 1
+    scheduler_patience = 10
+    scheduler_factor = 0.5
+    grad_clip_norm = 1.0
     
     print(f"\nTrial {trial.number}:")
-    print(f"  lr={lr:.6f}, atom_fea_len={atom_fea_len}, h_fea_len={h_fea_len}, n_conv={n_conv}")
-    print(f"  dropout={dropout}, batch_size={batch_size}, weight_decay={weight_decay}")
-    print(f"  n_h={n_h}, scheduler_patience={scheduler_patience}, scheduler_factor={scheduler_factor}")
-    print(f"  grad_clip_norm={grad_clip_norm}")
+    print(f"  lr={lr:.6f}, atom_fea_len={atom_fea_len}, n_conv={n_conv}")
+    print(f"  dropout={dropout}, weight_decay={weight_decay}")
     
     # Split dataset (same seed for consistency)
     train_idx, val_idx, _ = train_val_test_split(len(dataset), seed=42)
@@ -86,16 +92,21 @@ def objective(trial, dataset, device, epochs, use_log=True):
     # Suppress verbose output during optimization
     train_epoch._suppress_output = True
     
-    # Training loop
+    # Training loop with overfitting detection
     best_val_loss = float('inf')
     patience_counter = 0
     max_patience = 20  # Early stopping patience
+    train_losses = []
+    val_losses = []
     
     for epoch in range(epochs):
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device,
                                 use_log=use_log, grad_clip_norm=grad_clip_norm)
         val_loss = validate(model, val_loader, criterion, device, use_log=use_log)
         scheduler.step(val_loss)
+        
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
         
         # Report intermediate value for pruning
         trial.report(val_loss, epoch)
@@ -104,6 +115,7 @@ def objective(trial, dataset, device, epochs, use_log=True):
         if trial.should_prune():
             raise optuna.TrialPruned()
         
+        # Early stopping based on validation loss
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
@@ -113,7 +125,8 @@ def objective(trial, dataset, device, epochs, use_log=True):
                 break
         
         if epoch % 10 == 0:
-            print(f"  Epoch {epoch+1}/{epochs}: Train={train_loss:.6f}, Val={val_loss:.6f}")
+            overfitting_ratio = val_loss / (train_loss + 1e-8) if train_loss > 0 else 1.0
+            print(f"  Epoch {epoch+1}/{epochs}: Train={train_loss:.6f}, Val={val_loss:.6f}, Ratio={overfitting_ratio:.2f}")
     
     # Clean up
     delattr(train_epoch, '_suppress_output')
@@ -160,6 +173,23 @@ def main():
             direction='minimize',
             pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
         )
+    
+    # Enqueue current defaults as first trial
+    current_defaults = {
+        'lr': 0.000129,
+        'atom_fea_len': 128,
+        'h_fea_len': 128,
+        'n_conv': 4,
+        'dropout': 0.2,
+        'batch_size': 16,
+        'weight_decay': 1e-5,
+        'n_h': 1,
+        'scheduler_patience': 10,
+        'scheduler_factor': 0.5,
+        'grad_clip_norm': 1.0
+    }
+    study.enqueue_trial(current_defaults)
+    print(f"Enqueued current defaults as first trial")
     
     # Optimize
     print(f"\nStarting optimization with {args.n_trials} trials...")

@@ -8,7 +8,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from lmdb_dataset import LMDBCrystalDataset, collate_pool
-from cgcnn_model import FrequencyCGCNN
+from model_loader import load_model
 
 # ============================================================================
 # CHANGE MODEL NAME HERE
@@ -26,14 +26,9 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 dataset = LMDBCrystalDataset('processed_data/crystal_graphs.lmdb', use_kkr=True)
 
-model = FrequencyCGCNN(
-    orig_atom_fea_len=checkpoint['orig_atom_fea_len'],
-    nbr_fea_len=checkpoint['nbr_fea_len'],
-    n_frequencies=checkpoint['n_frequencies'],
-    n_output_channels=checkpoint['n_output_channels']
-).to(device)
-model.load_state_dict(checkpoint['model_state_dict'])
-model.eval()
+# Load model (automatically detects type)
+model, model_type = load_model(checkpoint, device)
+print(f"Model type: {model_type}")
 
 xi = dataset.kkr_xi_array
 
