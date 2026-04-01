@@ -55,25 +55,6 @@ def get_errors_for_indices(dataset, model, checkpoint, device, use_log, indices)
     return results
 
 
-# --- Simple inverse: E(ξ) = a + b/(ξ + ξ0) ---
-def model_simple_inverse(xi, a, b, xi0):
-    return a + b / (xi + xi0)
-
-
-def fit_simple_inverse(xi, abs_error):
-    def loss(params):
-        a, b, xi0 = params
-        if a < 0 or b < 0 or xi0 <= 0:
-            return 1e20
-        pred = model_simple_inverse(xi, a, b, xi0)
-        return np.sum((pred - abs_error) ** 2)
-
-    res = minimize(loss, [0.0, 10.0, 0.1], method="L-BFGS-B", bounds=[(0, None), (0, None), (1e-6, None)])
-    a, b, xi0 = res.x
-    rmse = np.sqrt(res.fun / len(xi))
-    return {"a": a, "b": b, "xi0": xi0}, rmse
-
-
 # --- Simple inverse with a=0: E(ξ) = b/(ξ + ξ0), error→0 as ξ→∞ ---
 def model_simple_inverse_a0(xi, b, xi0):
     return b / (xi + xi0)

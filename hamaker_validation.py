@@ -138,10 +138,12 @@ def hamaker_from_eps_xi(xi_ev, eps_xi, t_k=T_K, xi_step_ev=XI_STEP_EV, n_max=Non
     eps_xi = eps_xi[order]
 
     n_pts = len(xi_ev)
+    # fill_value=(eps_xi[0], 1.0): below grid → static dielectric; above grid → vacuum (ε→1).
+    # Cubic extrapolation outside the KKR grid is unphysical and can go negative.
     if n_pts >= 4:
-        interp = interp1d(xi_ev, eps_xi, kind="cubic", fill_value="extrapolate")
+        interp = interp1d(xi_ev, eps_xi, kind="cubic", bounds_error=False, fill_value=(eps_xi[0], 1.0))
     else:
-        interp = interp1d(xi_ev, eps_xi, kind="linear", fill_value="extrapolate")
+        interp = interp1d(xi_ev, eps_xi, kind="linear", bounds_error=False, fill_value=(eps_xi[0], 1.0))
 
     eps_0 = float(interp(0.0))
     delta_0 = (eps_0 - 1.0) / (eps_0 + 1.0)
@@ -171,9 +173,9 @@ def get_matsubara_sequences(xi_ev, eps_xi, t_k=T_K, xi_step_ev=XI_STEP_EV, n_max
     eps_xi = eps_xi[order]
     n_pts = len(xi_ev)
     if n_pts >= 4:
-        interp = interp1d(xi_ev, eps_xi, kind="cubic", fill_value="extrapolate")
+        interp = interp1d(xi_ev, eps_xi, kind="cubic", bounds_error=False, fill_value=(eps_xi[0], 1.0))
     else:
-        interp = interp1d(xi_ev, eps_xi, kind="linear", fill_value="extrapolate")
+        interp = interp1d(xi_ev, eps_xi, kind="linear", bounds_error=False, fill_value=(eps_xi[0], 1.0))
 
     d_n = np.zeros(n_max)
     delta_n = np.zeros(n_max)

@@ -1,10 +1,12 @@
 """
-Train a MACE model to predict ε(iξ) and per-crystal power-law error params (a,b,c).
+Train a MACE model to predict ε(iξ) and per-crystal a=0 power-law error params (b,c).
+
+  σ(ξ; b, c) = b / (ξ + c)^α   (α fixed, b,c > 0 via softplus head)
 
 Targets:
   - ε(iξ) from LMDB (KKR targets)
-Supervision for (a,b,c):
-  - match σ(ξ; a,b,c) to |ε_pred - ε_true| within each batch (correlated across ξ).
+Supervision for (b,c):
+  - match σ(ξ; b,c) to |ε_pred - ε_true| within each batch (correlated across ξ).
 
 Usage:
   python train_mace_frequency_with_error_params.py
@@ -124,7 +126,7 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--grad_clip_norm", type=float, default=1.0)
 
-    parser.add_argument("--alpha", type=float, default=3.0, help="Fixed α in σ(ξ)=a+b/(ξ+c)^α")
+    parser.add_argument("--alpha", type=float, default=3.0, help="Fixed α in σ(ξ)=b/(ξ+c)^α")
     parser.add_argument("--lambda_eps", type=float, default=1.0)
     parser.add_argument("--lambda_sigma", type=float, default=1.0)
 
@@ -219,6 +221,7 @@ def main():
                     "alpha": args.alpha,
                     "lambda_eps": args.lambda_eps,
                     "lambda_sigma": args.lambda_sigma,
+                    "sigma_transform": "log1p" if args.use_log else "none",
                 },
                 model_path,
             )

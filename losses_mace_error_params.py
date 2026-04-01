@@ -54,7 +54,7 @@ class SpectrumAndPowerLawABCLoss(nn.Module):
     def forward(self, eps_pred, abc_pred, eps_true):
         """
         eps_pred: (B, C, F) (either ε or log(ε); see eps_pred_is_log)
-        abc_pred: (B, 3)
+        abc_pred: (B, 2)  — (b, c) with b,c > 0
         eps_true: (B, C, F)
         """
         eps_pred_is_log = bool(getattr(self, "eps_pred_is_log", False))
