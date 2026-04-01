@@ -112,40 +112,40 @@ def fit_lorentzian(xi, abs_error):
     return {"a": a, "b": b, "xi0": xi0}, rmse
 
 
-# --- Power-law: E(ξ) = a + b/(ξ + c)^α ---
-def model_power_law(xi, a, b, c, alpha):
-    return a + b / ((xi + c) ** alpha)
+# --- Power-law a=0: E(ξ) = b/(ξ + c)^α, error→0 as ξ→∞ ---
+def model_power_law_a0(xi, b, c, alpha):
+    return b / ((xi + c) ** alpha)
 
 
-def fit_power_law(xi, abs_error):
+def fit_power_law_a0(xi, abs_error):
     def loss(params):
-        a, b, c, alpha = params
-        if a < 0 or b < 0 or c <= 0 or alpha <= 0:
+        b, c, alpha = params
+        if b < 0 or c <= 0 or alpha <= 0:
             return 1e20
-        pred = model_power_law(xi, a, b, c, alpha)
+        pred = model_power_law_a0(xi, b, c, alpha)
         return np.sum((pred - abs_error) ** 2)
 
-    res = minimize(loss, [0.0, 10.0, 0.1, 1.0], method="L-BFGS-B", bounds=[(0, None), (0, None), (1e-4, None), (0.1, 5.0)])
-    a, b, c, alpha = res.x
+    res = minimize(loss, [10.0, 0.1, 1.0], method="L-BFGS-B", bounds=[(0, None), (1e-4, None), (0.1, 5.0)])
+    b, c, alpha = res.x
     rmse = np.sqrt(res.fun / len(xi))
-    return {"a": a, "b": b, "c": c, "alpha": alpha}, rmse
+    return {"b": b, "c": c, "alpha": alpha}, rmse
 
 
-def fit_power_law_alpha_fixed(alpha_fixed):
-    """Power-law with fixed α; fit only (a, b, c). More stable than full power-law."""
+def fit_power_law_a0_alpha_fixed(alpha_fixed):
+    """Power-law a=0 with fixed α; fit only (b, c)."""
 
     def fit_fn(xi, abs_error):
         def loss(params):
-            a, b, c = params
-            if a < 0 or b < 0 or c <= 0:
+            b, c = params
+            if b < 0 or c <= 0:
                 return 1e20
-            pred = model_power_law(xi, a, b, c, alpha_fixed)
+            pred = model_power_law_a0(xi, b, c, alpha_fixed)
             return np.sum((pred - abs_error) ** 2)
 
-        res = minimize(loss, [0.0, 10.0, 0.1], method="L-BFGS-B", bounds=[(0, None), (0, None), (1e-4, None)])
-        a, b, c = res.x
+        res = minimize(loss, [10.0, 0.1], method="L-BFGS-B", bounds=[(0, None), (1e-4, None)])
+        b, c = res.x
         rmse = np.sqrt(res.fun / len(xi))
-        return {"a": a, "b": b, "c": c}, rmse
+        return {"b": b, "c": c}, rmse
 
     return fit_fn
 
@@ -293,16 +293,14 @@ def main():
     val_results = get_errors_for_indices(dataset, model, checkpoint, device, use_log, val_idx)
     test_results = get_errors_for_indices(dataset, model, checkpoint, device, use_log, test_idx)
     dataset.close()
-    print(f"Fitting 8 models on each split (train / val / test).\n")
+    print(f"Fitting 6 models on each split (train / val / test).\n")
 
     models_to_fit = [
-        ("simple_inverse", ["a", "b", "xi0"], fit_simple_inverse),
         ("simple_inverse_a0", ["b", "xi0"], fit_simple_inverse_a0),
         ("lorentzian", ["a", "b", "xi0"], fit_lorentzian),
-        ("power_law", ["a", "b", "c", "alpha"], fit_power_law),
-        ("power_law_alpha1", ["a", "b", "c"], fit_power_law_alpha_fixed(1.0)),
-        ("power_law_alpha2", ["a", "b", "c"], fit_power_law_alpha_fixed(2.0)),
-        ("log_linear", ["c0", "c1"], fit_log_linear),
+        ("power_law_a0", ["b", "c", "alpha"], fit_power_law_a0),
+        ("power_law_a0_alpha1", ["b", "c"], fit_power_law_a0_alpha_fixed(1.0)),
+        ("power_law_a0_alpha2", ["b", "c"], fit_power_law_a0_alpha_fixed(2.0)),
         ("exponential", ["a", "b", "xi0"], fit_exponential),
     ]
     all_comparisons = []

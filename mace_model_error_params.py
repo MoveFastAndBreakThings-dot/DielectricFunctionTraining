@@ -1,9 +1,11 @@
 """
-MACE variant that predicts ε(iξ) and power-law error parameters (a,b,c).
+MACE variant that predicts ε(iξ) and a=0 power-law error parameters (b,c).
+
+  σ(ξ) = b / (ξ + c)^α    [a=0 so σ→0 as ξ→∞]
 
 Outputs:
   - eps_pred: (batch, n_output_channels, n_frequencies)
-  - abc_pred: (batch, 3) with positive entries via softplus
+  - bc_pred:  (batch, 2) with positive entries via softplus
 """
 
 import torch
@@ -60,13 +62,13 @@ class FrequencyMACEWithABC(nn.Module):
             nn.Linear(h_fea_len * 2, n_frequencies * n_output_channels),
         )
 
-        self.fc_abc = nn.Sequential(
+        self.fc_bc = nn.Sequential(
             nn.Linear(h_fea_len, abc_hidden),
             nn.Softplus(),
             nn.Dropout(dropout),
-            nn.Linear(abc_hidden, 3),
+            nn.Linear(abc_hidden, 2),
         )
-        self.abc_pos = nn.Softplus()
+        self.bc_pos = nn.Softplus()
 
     def forward(self, atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx):
         atom_fea = self.embedding(atom_fea)
@@ -84,9 +86,9 @@ class FrequencyMACEWithABC(nn.Module):
         batch = out_freq.shape[0]
         eps_pred = out_freq.view(batch, self.n_output_channels, self.n_frequencies)
 
-        abc_raw = self.fc_abc(crys_fea)
-        abc_pred = self.abc_pos(abc_raw)
-        return eps_pred, abc_pred
+        bc_raw = self.fc_bc(crys_fea)
+        bc_pred = self.bc_pos(bc_raw)
+        return eps_pred, bc_pred
 
     @staticmethod
     def pooling(atom_fea, crystal_atom_idx):

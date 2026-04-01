@@ -1,14 +1,15 @@
 """
-Loss for joint prediction of ε(iξ) and power-law error parameters (a,b,c).
+Loss for joint prediction of ε(iξ) and a=0 power-law error parameters (b,c).
 
-We do not assume labeled (a,b,c). Instead we supervise (a,b,c) by matching the
+We do not assume labeled (b,c). Instead we supervise (b,c) by matching the
 predicted uncertainty curve σ(ξ) to the observed absolute residual |ε_pred-ε_true|
 within each batch.
 
-Power-law uncertainty curve (same convention as fit_error_models.model_power_law):
-  σ(ξ) = a + b / (ξ + c)^α
+Power-law uncertainty curve (same convention as fit_error_models.model_power_law_a0):
+  σ(ξ) = b / (ξ + c)^α    [a=0 so σ→0 as ξ→∞]
 
-α is fixed (set in training script), while a,b,c are predicted per crystal.
+α is fixed (set in training script), while b,c are predicted per crystal.
+The model head outputs 2 values (b, c); abc_pred below refers to (b, c).
 """
 
 import torch
@@ -40,15 +41,14 @@ class SpectrumAndPowerLawABCLoss(nn.Module):
 
     def sigma_from_abc(self, abc):
         """
-        abc: (B, 3) with (a,b,c) >= 0
+        abc: (B, 2) with (b, c) >= 0  [a=0 so σ→0 as ξ→∞]
         returns sigma: (B, 1, F) broadcast-ready
         """
-        a = abc[:, 0:1]
-        b = abc[:, 1:2]
-        c = abc[:, 2:3].clamp_min(self.eps_min_c)
+        b = abc[:, 0:1]
+        c = abc[:, 1:2].clamp_min(self.eps_min_c)
         xi = self.xi.view(1, -1)
         denom = (xi + c) ** self.alpha
-        sigma = a + b / denom
+        sigma = b / denom
         return sigma.unsqueeze(1)
 
     def forward(self, eps_pred, abc_pred, eps_true):

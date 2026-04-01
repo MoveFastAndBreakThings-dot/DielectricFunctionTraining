@@ -1,7 +1,9 @@
 """
-Correlated uncertainty in Hamaker constant A for the power-law dielectric error model:
+Correlated uncertainty in Hamaker constant A for the a=0 power-law dielectric error model:
 
-    σ(ξ; a, b, c, α) = a + b / (ξ + c)^α   (ξ in eV; same as fit_error_models.model_power_law)
+    σ(ξ; b, c, α) = b / (ξ + c)^α   (ξ in eV; same as fit_error_models.model_power_law_a0)
+
+a=0 so σ→0 as ξ→∞, matching the physical requirement that ε→1 at high frequency.
 
 Linearizing ε_n → ε_n^nom + σ(ξ_n; θ) gives
 
@@ -10,7 +12,7 @@ Linearizing ε_n → ε_n^nom + σ(ξ_n; θ) gives
 with ∂A/∂ε_n = 6 k_B T w_n Δ_n / (ε_n + 1)^2, w_0 = 1/2, w_{n≥1} = 1,
 Δ_n = (ε_n - 1)/(ε_n + 1). Then Var(A) ≈ g^T Σ_θ g.
 
-α is treated as fixed (e.g. mean α from fits); θ = (a, b, c).
+α is treated as fixed (e.g. mean α from fits); θ = (b, c).
 """
 
 import json
@@ -42,42 +44,39 @@ def _dA_depsn(eps_n, delta_n, w_n, t_k=T_K, k_b=K_B_J):
     return 6.0 * k_b * t_k * w_n * delta_n / (den ** 2)
 
 
-def _dsigma_power_law_dabc(xi_ev, a, b, c, alpha):
-    """∂σ/∂a, ∂σ/∂b, ∂σ/∂c for σ = a + b/(ξ+c)^α."""
+def _dsigma_power_law_a0_dbc(xi_ev, b, c, alpha):
+    """∂σ/∂b, ∂σ/∂c for σ = b/(ξ+c)^α  (a=0)."""
     xi_c = xi_ev + c
     if xi_c <= 0:
         raise ValueError("ξ + c must be positive for the power-law model.")
     pa = xi_c ** alpha
-    d_da = 1.0
     d_db = 1.0 / pa
     d_dc = -alpha * b / (xi_c ** (alpha + 1.0))
-    return d_da, d_db, d_dc
+    return d_db, d_dc
 
 
-def grad_A_wrt_abc_power_law(d_n, delta_n, a, b, c, alpha, xi_step_ev=XI_STEP_EV, n_max=None, t_k=T_K):
-    """g = (g_a, g_b, g_c) with ξ_n = n * xi_step_ev."""
+def grad_A_wrt_bc_power_law_a0(d_n, delta_n, b, c, alpha, xi_step_ev=XI_STEP_EV, n_max=None, t_k=T_K):
+    """g = (g_b, g_c) with ξ_n = n * xi_step_ev."""
     if n_max is None:
         n_max = len(d_n)
     w = _matsubara_weights(n_max)
-    g_a = g_b = g_c = 0.0
+    g_b = g_c = 0.0
     for n in range(n_max):
         xi_n = n * xi_step_ev
         deps = _dA_depsn(d_n[n], delta_n[n], w[n], t_k=t_k)
-        d_da, d_db, d_dc = _dsigma_power_law_dabc(xi_n, a, b, c, alpha)
-        g_a += deps * d_da
+        d_db, d_dc = _dsigma_power_law_a0_dbc(xi_n, b, c, alpha)
         g_b += deps * d_db
         g_c += deps * d_dc
-    return np.array([g_a, g_b, g_c], dtype=np.float64)
+    return np.array([g_b, g_c], dtype=np.float64)
 
 
 def var_A_from_grad(g, theta_cov):
     return float(np.asarray(g) @ np.asarray(theta_cov, dtype=np.float64) @ np.asarray(g))
 
 
-def hamaker_sigma_A_power_law_correlated_zj(
+def hamaker_sigma_A_power_law_a0_correlated_zj(
     xi_ev,
     eps_xi,
-    a,
     b,
     c,
     alpha,
@@ -87,31 +86,31 @@ def hamaker_sigma_A_power_law_correlated_zj(
     t_k=T_K,
 ):
     """
-    sqrt(Var(A)) in zJ for power-law σ; α fixed, Σ_θ is 3×3 for (a, b, c).
+    sqrt(Var(A)) in zJ for a=0 power-law σ = b/(ξ+c)^α; α fixed, Σ_θ is 2×2 for (b, c).
 
     xi_ev, eps_xi : nominal predicted ε(iξ) on the KKR grid (interpolated to Matsubara).
-    a, b, c : evaluate g at these (e.g. test-split means).
-    theta_cov : covariance of (a, b, c); diagonal from split stds is typical.
+    b, c         : evaluate g at these (e.g. test-split means from compare_power_law_a0.json).
+    theta_cov    : 2×2 covariance of (b, c); diagonal from split stds is typical.
     """
     if n_max is None:
         n_max = N_MATSUBARA
     d_n, delta_n = get_matsubara_sequences(
         xi_ev, eps_xi, t_k=t_k, xi_step_ev=xi_step_ev, n_max=n_max
     )
-    g = grad_A_wrt_abc_power_law(
-        d_n, delta_n, float(a), float(b), float(c), float(alpha), xi_step_ev=xi_step_ev, n_max=n_max, t_k=t_k
+    g = grad_A_wrt_bc_power_law_a0(
+        d_n, delta_n, float(b), float(c), float(alpha), xi_step_ev=xi_step_ev, n_max=n_max, t_k=t_k
     )
     var_a = var_A_from_grad(g, theta_cov)
     return np.sqrt(max(var_a, 0.0)) * ZJ_PER_J, g, var_a
 
 
-def load_theta_mean_cov_abc_from_compare_power_law(compare_path, split="test"):
-    """Diagonal Σ from error_model_fits/compare_power_law.json for (a, b, c)."""
+def load_theta_mean_cov_bc_from_compare_power_law_a0(compare_path, split="test"):
+    """Diagonal Σ from error_model_fits/compare_power_law_a0.json for (b, c)."""
     with open(compare_path) as f:
         data = json.load(f)
     means = []
     var = []
-    for name in ("a", "b", "c"):
+    for name in ("b", "c"):
         entry = data[name][split]
         if entry is None:
             raise ValueError(f"Missing {split} for {name}")
@@ -120,7 +119,7 @@ def load_theta_mean_cov_abc_from_compare_power_law(compare_path, split="test"):
     return np.array(means, dtype=np.float64), np.diag(var)
 
 
-def load_alpha_mean_from_compare_power_law(compare_path, split="test"):
+def load_alpha_mean_from_compare_power_law_a0(compare_path, split="test"):
     with open(compare_path) as f:
         data = json.load(f)
     entry = data["alpha"][split]
@@ -130,15 +129,15 @@ def load_alpha_mean_from_compare_power_law(compare_path, split="test"):
 
 
 if __name__ == "__main__":
-    compare_path = os.path.join("error_model_fits", "compare_power_law.json")
+    compare_path = os.path.join("error_model_fits", "compare_power_law_a0.json")
     lmdb_path = "processed_data/crystal_graphs.lmdb"
     if not os.path.exists(compare_path):
         print(f"Run fit_error_models.py first; need {compare_path}")
     elif not os.path.exists(lmdb_path):
         print(f"Need {lmdb_path}")
     else:
-        theta_mean, theta_cov = load_theta_mean_cov_abc_from_compare_power_law(compare_path, split="test")
-        alpha = load_alpha_mean_from_compare_power_law(compare_path, split="test")
+        theta_mean, theta_cov = load_theta_mean_cov_bc_from_compare_power_law_a0(compare_path, split="test")
+        alpha = load_alpha_mean_from_compare_power_law_a0(compare_path, split="test")
 
         ds = LMDBCrystalDataset(lmdb_path, use_kkr=True)
         xi = np.asarray(ds.kkr_xi_array, dtype=np.float64)
@@ -147,8 +146,8 @@ if __name__ == "__main__":
         ds.close()
 
         n_prop = min(500, N_MATSUBARA)
-        s_zj, g, va = hamaker_sigma_A_power_law_correlated_zj(
-            xi, eps_nom, theta_mean[0], theta_mean[1], theta_mean[2], alpha, theta_cov, n_max=n_prop
+        s_zj, g, va = hamaker_sigma_A_power_law_a0_correlated_zj(
+            xi, eps_nom, theta_mean[0], theta_mean[1], alpha, theta_cov, n_max=n_prop
         )
         print(f"Demo: first crystal, n_max={n_prop}, alpha={alpha:.4f}")
-        print(f"  sigma_A (correlated, power-law θ) = {s_zj:.4f} zJ, Var(A)={va:.6e} J^2, g={g}")
+        print(f"  sigma_A (correlated, a=0 power-law θ) = {s_zj:.4f} zJ, Var(A)={va:.6e} J^2, g=(g_b, g_c)={g}")
