@@ -146,6 +146,51 @@ def plot_summary(samples, xi, k_sigma, alpha, save_path, log_x=True):
     print(f"  Saved: {save_path}")
 
 
+def plot_all_individual(samples, xi, k_sigma, alpha, out_dir):
+    """Save one PNG per crystal to out_dir/{mpid}_{formula}.png"""
+    os.makedirs(out_dir, exist_ok=True)
+    for i, s in enumerate(samples):
+        sigma = sigma_curve(xi, s["b"], s["c"], alpha)
+        upper = s["eps_pred"] + k_sigma * sigma
+        lower = np.maximum(s["eps_pred"] - k_sigma * sigma, 1e-6)
+
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+        for ax, use_log in zip(axes, [True, False]):
+            ax.fill_between(xi, lower, upper, alpha=0.25, color="C0",
+                            label=f"pred ± {k_sigma}σ")
+            ax.plot(xi, s["eps_pred"], color="C0", lw=1.5, label="Predicted")
+            ax.plot(xi, s["eps_true"], color="C1", lw=1.5, ls="--", label="Actual")
+            if use_log:
+                ax.set_xscale("log")
+                ax.set_title("Log ξ")
+            else:
+                ax.set_title("Linear ξ")
+            ax.set_xlabel("ξ (eV)")
+            ax.set_ylabel("ε(iξ)")
+            ax.set_ylim(bottom=0.9)
+            ax.legend(fontsize=8)
+
+        mae = float(np.mean(np.abs(s["eps_pred"] - s["eps_true"])))
+        mpid = s.get("mpid", f"idx{i}")
+        formula = s.get("formula", "")
+        fig.suptitle(
+            f"{mpid}  {formula}  |  MAE={mae:.4f}  b={s['b']:.3f}  c={s['c']:.3f} eV",
+            fontsize=10,
+        )
+        plt.tight_layout()
+
+        # sanitise filename
+        safe = f"{mpid}_{formula}".replace("/", "-").replace(" ", "_")
+        fname = os.path.join(out_dir, f"{safe}.png")
+        plt.savefig(fname, dpi=120, bbox_inches="tight")
+        plt.close()
+
+        if (i + 1) % 50 == 0:
+            print(f"  {i + 1}/{len(samples)} crystals saved...")
+
+    print(f"  Saved {len(samples)} individual plots to {out_dir}/")
+
+
 def plot_residual_vs_sigma(samples, xi, alpha, save_path):
     """
     Scatter of actual |ε_pred - ε_true| vs predicted σ(ξ) across all (crystal, ξ) pairs.
@@ -192,6 +237,8 @@ def main():
     parser.add_argument("--k_sigma", type=float, default=2.5,
                         help="Band width in units of σ")
     parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--all_individual", action="store_true",
+                        help="Save one PNG per crystal into plot_band/all_crystals/")
     args = parser.parse_args()
 
     checkpoint = torch.load(args.model_path, map_location="cpu")
@@ -283,6 +330,14 @@ def main():
         samples, xi, alpha,
         save_path=os.path.join(OUT_DIR, "residual_vs_sigma.png"),
     )
+
+    if args.all_individual:
+        print(f"\nSaving one plot per crystal ({len(samples)} total)...")
+        plot_all_individual(
+            samples, xi, args.k_sigma, alpha,
+            out_dir=os.path.join(OUT_DIR, "all_crystals"),
+        )
+
     print(f"\nAll plots saved to {OUT_DIR}/")
 
 
