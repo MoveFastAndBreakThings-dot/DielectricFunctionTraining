@@ -22,13 +22,51 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from scipy.interpolate import interp1d
 from scipy.optimize import minimize
 from torch.utils.data import DataLoader, Subset
 
-from hamaker_validation import K_B_J, T_K, XI_STEP_EV, ZJ_PER_J, get_matsubara_sequences
 from lmdb_dataset import LMDBCrystalDataset, collate_pool
 from losses_mace_error_params import SpectrumAndPowerLawABCLoss
 from mace_model_error_params import FrequencyMACEWithABC
+
+# Physical constants (Lifshitz / Matsubara)
+T_K = 300.0
+K_B_J = 1.380649e-23        # J/K
+K_B_EV = 8.617333e-5        # eV/K
+XI_STEP_EV = 2 * np.pi * K_B_EV * T_K   # ~0.1619 eV  (Matsubara spacing)
+ZJ_PER_J = 1e21             # 1 zJ = 10^-21 J
+N_MATSUBARA = 5000
+
+
+def get_matsubara_sequences(xi_ev, eps_xi, t_k=T_K, xi_step_ev=XI_STEP_EV, n_max=None):
+    """
+    Return (d_n, delta_n) arrays for n=0..n_max-1.
+    d_n = ε(iξ_n),  Δ_n = (d_n − 1)/(d_n + 1).
+    Used for error propagation: ∂A/∂d_n and σ(ξ_n).
+    """
+    if n_max is None:
+        n_max = N_MATSUBARA
+    xi_ev = np.asarray(xi_ev)
+    eps_xi = np.asarray(eps_xi)
+    order = np.argsort(xi_ev)
+    xi_ev = xi_ev[order]
+    eps_xi = eps_xi[order]
+    if len(xi_ev) >= 4:
+        interp = interp1d(xi_ev, eps_xi, kind="cubic",
+                          bounds_error=False, fill_value=(eps_xi[0], 1.0))
+    else:
+        interp = interp1d(xi_ev, eps_xi, kind="linear",
+                          bounds_error=False, fill_value=(eps_xi[0], 1.0))
+    d_n = np.zeros(n_max)
+    delta_n = np.zeros(n_max)
+    d_n[0] = float(interp(0.0))
+    delta_n[0] = (d_n[0] - 1.0) / (d_n[0] + 1.0)
+    for n in range(1, n_max):
+        xi_n = n * xi_step_ev
+        d_n[n] = float(interp(xi_n))
+        delta_n[n] = (d_n[n] - 1.0) / (d_n[n] + 1.0)
+    return d_n, delta_n
 
 OUT_DIR = "analysis_error_params"
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -152,7 +190,7 @@ def hist_cdf(arr, xlabel, title, save_path, color="C0", vlines=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", default="models/mace_kkr_with_abc_v2.pt")
+    parser.add_argument("--model_path", default="models/mace_kkr_with_abc_v3_stage2.pt")
     parser.add_argument("--lmdb_path", default="processed_data/crystal_graphs.lmdb")
     parser.add_argument("--n_matsubara", type=int, default=500)
     parser.add_argument("--batch_size", type=int, default=16)
