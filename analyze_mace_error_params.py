@@ -5,6 +5,8 @@ Part (i): Loss breakdown + distribution of predicted (b, c) on the test set.
 Part (ii): Per-crystal Hamaker uncertainty σ_A from the predicted (b, c),
            using uncorrelated propagation:
                σ_A² = Σ_n (∂A/∂ε_n)² · σ(ξ_n)²,   σ(ξ_n) = b̂/(ξ_n + ĉ)^α
+Part (iii): "Oracle" (b*, c*) fit per crystal from actual residuals |ε_pred − ε_true|,
+            compared against model-predicted (b̂, ĉ) to measure b and c prediction error.
 
 Usage:
     python analyze_mace_error_params.py
@@ -17,6 +19,7 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from scipy.optimize import minimize
 from torch.utils.data import DataLoader, Subset
 
 from hamaker_validation import K_B_J, N_MATSUBARA, T_K, XI_STEP_EV, ZJ_PER_J, get_matsubara_sequences
@@ -208,7 +211,8 @@ def main():
     total_loss = total_loss_eps = total_loss_sigma = 0.0
     n_total = 0
     b_list, c_list = [], []
-    records = []
+    records = []       # predicted ε in real space
+    records_true = []  # actual ε in real space
 
     with torch.no_grad():
         for inputs, target, _ in test_loader:
@@ -232,12 +236,12 @@ def main():
             b_list.append(bc_cpu[:, 0])
             c_list.append(bc_cpu[:, 1])
 
-            # store per-crystal ε prediction for part (ii)
             if use_log:
                 eps_real = torch.exp(eps_out).cpu().numpy()
             else:
                 eps_real = eps_out.cpu().numpy()
             records.append(eps_real)
+            records_true.append(target.cpu().numpy())
 
     mean_loss = total_loss / n_total
     mean_loss_eps = total_loss_eps / n_total
@@ -269,6 +273,7 @@ def main():
 
     sigma_A_list = []
     eps_all = np.concatenate(records, axis=0)
+    eps_true_all = np.concatenate(records_true, axis=0)
 
     for i, idx in enumerate(test_idx):
         eps_pred_i = eps_all[i, 0, :]
@@ -306,6 +311,139 @@ def main():
     plt.close()
 
     print(f"\n  All plots saved to {OUT_DIR}/")
+
+    # -----------------------------------------------------------------------
+    # Part (iii): oracle (b*, c*) per crystal — predicted vs fitted
+    # -----------------------------------------------------------------------
+    print(f"\n{'='*60}")
+    print("Part (iii): oracle (b*, c*) fit per crystal vs model (b̂, ĉ)")
+    print(f"  Fits σ(ξ) = b/(ξ+c)^α to actual |ε_pred − ε_true| for each crystal")
+    print(f"  α = {alpha:.3f}")
+    print(f"{'='*60}")
+
+    def _fit_bc(residuals, xi_ev, alpha_val):
+        """Least-squares fit of b/(ξ+c)^α to residual curve. Returns (b*, c*) or None."""
+        mask = residuals > 1e-9
+        if mask.sum() < 5:
+            return None
+        xi_m, r_m = xi_ev[mask], residuals[mask]
+
+        def loss_fn(params):
+            log_b, log_c = params
+            b_ = np.exp(log_b)
+            c_ = np.exp(log_c)
+            sigma_ = b_ / (xi_m + c_) ** alpha_val
+            return np.mean((np.log1p(sigma_) - np.log1p(r_m)) ** 2)
+
+        best_val, best_res = np.inf, None
+        for log_b0, log_c0 in [(np.log(1.0), np.log(0.5)), (np.log(5.0), np.log(1.0)),
+                                (np.log(20.0), np.log(2.0)), (np.log(50.0), np.log(0.1))]:
+            res = minimize(loss_fn, [log_b0, log_c0], method="Nelder-Mead",
+                           options={"maxiter": 2000, "xatol": 1e-5, "fatol": 1e-7})
+            if res.fun < best_val:
+                best_val, best_res = res.fun, res
+        if best_res is None or not best_res.success and best_res.fun > 1.0:
+            return None
+        b_fit = float(np.exp(best_res.x[0]))
+        c_fit = float(np.exp(best_res.x[1]))
+        return b_fit, c_fit
+
+    b_fit_list, c_fit_list, b_pred_matched, c_pred_matched = [], [], [], []
+    n_failed = 0
+    for i in range(len(test_idx)):
+        eps_p = eps_all[i, 0, :]
+        eps_t = eps_true_all[i, 0, :]
+        residuals = np.abs(eps_p - eps_t)
+        result = _fit_bc(residuals, xi, alpha)
+        if result is None:
+            n_failed += 1
+            continue
+        b_fit_list.append(result[0])
+        c_fit_list.append(result[1])
+        b_pred_matched.append(float(b_arr[i]))
+        c_pred_matched.append(float(c_arr[i]))
+
+    b_fit_arr = np.array(b_fit_list)
+    c_fit_arr = np.array(c_fit_list)
+    b_pred_matched = np.array(b_pred_matched)
+    c_pred_matched = np.array(c_pred_matched)
+
+    print(f"\n  Crystals fitted successfully: {len(b_fit_arr)} / {len(test_idx)}  ({n_failed} failed)")
+
+    b_err = b_pred_matched - b_fit_arr
+    c_err = c_pred_matched - c_fit_arr
+
+    print(f"\n  b  prediction error  (b̂ − b*):")
+    print(f"    MAE  = {np.mean(np.abs(b_err)):.4f}")
+    print(f"    RMSE = {np.sqrt(np.mean(b_err**2)):.4f}")
+    print(f"    bias = {np.mean(b_err):.4f}  (positive → model over-predicts b)")
+    print(f"    std  = {np.std(b_err):.4f}")
+
+    print(f"\n  c  prediction error  (ĉ − c*)  [eV]:")
+    print(f"    MAE  = {np.mean(np.abs(c_err)):.4f}")
+    print(f"    RMSE = {np.sqrt(np.mean(c_err**2)):.4f}")
+    print(f"    bias = {np.mean(c_err):.4f}  (positive → model over-predicts c)")
+    print(f"    std  = {np.std(c_err):.4f}")
+
+    # --- scatter: predicted vs oracle ---
+    fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+    for ax, pred, fit, label, unit in zip(
+        axes,
+        [b_pred_matched, c_pred_matched],
+        [b_fit_arr, c_fit_arr],
+        ["b", "c"],
+        ["", " (eV)"],
+    ):
+        ax.scatter(fit, pred, s=8, alpha=0.35, color="C0")
+        lims = [min(fit.min(), pred.min()) * 0.9, max(fit.max(), pred.max()) * 1.1]
+        ax.plot(lims, lims, "k--", lw=1.2, label="y = x  (perfect)")
+        ax.set_xlabel(f"Oracle {label}*{unit}  (fit to residuals)")
+        ax.set_ylabel(f"Model {label}̂{unit}  (predicted)")
+        mae = np.mean(np.abs(pred - fit))
+        ax.set_title(f"{label}:  MAE = {mae:.3f}{unit}")
+        ax.legend(fontsize=8)
+    fig.suptitle("Model-predicted (b̂, ĉ) vs oracle-fitted (b*, c*) per test crystal", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR, "bc_predicted_vs_oracle.png"), dpi=150)
+    plt.close()
+
+    # --- error distribution ---
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    for ax, err, label, unit in zip(axes, [b_err, c_err], ["b̂ − b*", "ĉ − c*"], ["", " (eV)"]):
+        ax.hist(err, bins=50, alpha=0.75, color="C3", edgecolor="k")
+        ax.axvline(0, color="k", ls="--", lw=1.2, label="zero error")
+        ax.axvline(np.mean(err), color="r", ls=":", lw=1.5, label=f"mean={np.mean(err):.3f}")
+        ax.set_xlabel(f"{label}{unit}")
+        ax.set_ylabel("Count")
+        ax.set_title(f"Distribution of {label}{unit}")
+        ax.legend(fontsize=8)
+    fig.suptitle("Prediction error on b and c (model vs oracle)", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR, "bc_error_distribution.png"), dpi=150)
+    plt.close()
+
+    # --- oracle b*, c* distributions ---
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    for ax, arr, label, unit, color in zip(
+        axes,
+        [b_fit_arr, c_fit_arr],
+        ["b*", "c*"],
+        ["", " (eV)"],
+        ["C0", "C1"],
+    ):
+        ax.hist(arr, bins=50, alpha=0.75, color=color, edgecolor="k")
+        ax.axvline(np.mean(arr), color="k", ls="--", lw=1.5, label=f"mean={np.mean(arr):.3f}")
+        ax.axvline(np.median(arr), color="r", ls=":", lw=1.5, label=f"med={np.median(arr):.3f}")
+        ax.set_xlabel(f"Oracle {label}{unit}")
+        ax.set_ylabel("Count")
+        ax.set_title(f"Oracle {label} distribution{unit}")
+        ax.legend(fontsize=8)
+    fig.suptitle("Oracle (b*, c*) fitted to per-crystal residuals", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR, "bc_oracle_distribution.png"), dpi=150)
+    plt.close()
+
+    print(f"\n  Part (iii) plots saved to {OUT_DIR}/")
     dataset.close()
 
 
