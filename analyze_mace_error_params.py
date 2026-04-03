@@ -158,6 +158,12 @@ def main():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--k_sigma", type=float, default=K_SIGMA,
                         help="Multiplier on sigma for the uncertainty band (default 2.5)")
+    parser.add_argument("--metal_eps_threshold", type=float, default=50.0,
+                        help="Crystals with eps_true at lowest xi > this are flagged as metals "
+                             "and excluded. Set to inf to keep all. (default 50)")
+    parser.add_argument("--max_oracle_b", type=float, default=1e5,
+                        help="Oracle b* fits above this are treated as failed and excluded "
+                             "(runaway fits on near-metallic crystals). (default 1e5)")
     args = parser.parse_args()
 
     ckpt = torch.load(args.model_path, map_location="cpu")
@@ -241,32 +247,58 @@ def main():
     print(f"  Test loss sig part = {total_loss_sigma/n_total:.6f}")
     print(f"  N test crystals    = {n_total}")
 
+    # ---- metal filter ----
+    # eps_true[:, 0, 0] is ε at the lowest imaginary frequency.
+    # For metals ε(iξ→0) → ∞ (Drude divergence); insulators are finite.
+    eps_low = eps_true_all[:, 0, 0]
+    insulator_mask = eps_low <= args.metal_eps_threshold
+    n_metals = int((~insulator_mask).sum())
+    n_insulators = int(insulator_mask.sum())
+    print(f"\n  Metal filter (eps_true at lowest xi > {args.metal_eps_threshold}):")
+    print(f"    Metals excluded : {n_metals}")
+    print(f"    Insulators kept : {n_insulators}")
+
+    # apply mask — all downstream analysis uses only insulators
+    eps_pred_all  = eps_pred_all[insulator_mask]
+    eps_true_all  = eps_true_all[insulator_mask]
+    b_hat         = b_hat[insulator_mask]
+    c_hat         = c_hat[insulator_mask]
+    test_idx_ins  = [test_idx[i] for i in range(n_total) if insulator_mask[i]]
+    n_total       = n_insulators
+
     # -----------------------------------------------------------------------
     # Step 2 — oracle fit: (b*, c*) per crystal
     # -----------------------------------------------------------------------
     print(f"\n{sep}")
     print("Step 2: oracle (b*, c*) fit to actual per-crystal residuals")
     print(f"  sigma(xi) = b/(xi+c)^alpha,  alpha={alpha:.3f}")
+    print(f"  Runaway fits with b* > {args.max_oracle_b:.0e} also excluded")
     print(sep)
 
     b_star_list, c_star_list = [], []
     valid_mask = np.zeros(n_total, dtype=bool)
+    n_runaway = 0
 
     for i in range(n_total):
         res = np.abs(eps_pred_all[i, 0, :] - eps_true_all[i, 0, :])
         result = fit_bc_oracle(res, xi, alpha)
-        if result is not None:
+        if result is not None and result[0] <= args.max_oracle_b:
             b_star_list.append(result[0])
             c_star_list.append(result[1])
             valid_mask[i] = True
         else:
+            if result is not None and result[0] > args.max_oracle_b:
+                n_runaway += 1
             b_star_list.append(np.nan)
             c_star_list.append(np.nan)
 
     b_star = np.array(b_star_list)
     c_star = np.array(c_star_list)
     n_ok = valid_mask.sum()
-    print(f"  Fitted successfully: {n_ok} / {n_total}  ({n_total-n_ok} failed)")
+    n_fit_failed = n_total - n_ok - n_runaway
+    print(f"  Fitted successfully : {n_ok} / {n_total}")
+    print(f"  Runaway fits (b*>{args.max_oracle_b:.0e}) excluded: {n_runaway}")
+    print(f"  Convergence failures: {n_fit_failed}")
 
     # -----------------------------------------------------------------------
     # Step 3 — b and c prediction error
