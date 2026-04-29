@@ -33,7 +33,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, use_log=False, 
     total_loss = 0.0
     n_samples = 0
     
-    for batch_idx, (inputs, target, _) in enumerate(dataloader):
+    for batch_idx, (inputs, target, is_metal) in enumerate(dataloader):
         atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx = inputs
         atom_fea = atom_fea.to(device)
         nbr_fea = nbr_fea.to(device)
@@ -46,7 +46,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, use_log=False, 
         
         optimizer.zero_grad()
         output = model(atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx)
-        loss = criterion(output, target)
+        loss = criterion(output, target, is_metal)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
         optimizer.step()
@@ -67,7 +67,7 @@ def validate(model, dataloader, criterion, device, use_log=False):
     n_samples = 0
     
     with torch.no_grad():
-        for inputs, target, _ in dataloader:
+        for inputs, target, is_metal in dataloader:
             atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx = inputs
             atom_fea = atom_fea.to(device)
             nbr_fea = nbr_fea.to(device)
@@ -78,7 +78,7 @@ def validate(model, dataloader, criterion, device, use_log=False):
                 target = torch.log(target)
             
             output = model(atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx)
-            loss = criterion(output, target)
+            loss = criterion(output, target, is_metal)
             
             total_loss += loss.item() * target.shape[0]
             n_samples += target.shape[0]
@@ -138,6 +138,12 @@ def main():
                         help='Dielectric components to predict (comma-separated: xx,yy,zz)')
     parser.add_argument('--use_log', action='store_true',
                         help='Train in log-space (predict log(ε), better for high dynamic range)')
+    parser.add_argument('--n_low_freq', type=int, default=0,
+                        help='Number of low-frequency points to discount for metals (0 = disabled)')
+    parser.add_argument('--metal_low_freq_weight', type=float, default=0.1,
+                        help='Loss weight for discounted low-freq points in metals')
+    parser.add_argument('--metal_gap_threshold', type=float, default=0.1,
+                        help='Band gap threshold (eV) below which a material is treated as metal')
     
     # Model architecture hyperparameters
     parser.add_argument('--atom_fea_len', type=int, default=128,
@@ -167,7 +173,8 @@ def main():
     dataset = LMDBCrystalDataset(
         args.lmdb_path, 
         target_components=target_components,
-        use_kkr=True
+        use_kkr=True,
+        metal_gap_threshold=args.metal_gap_threshold,
     )
     
     print(f"Total samples: {len(dataset)}")
@@ -219,7 +226,11 @@ def main():
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Training setup - frequency-weighted loss
-    criterion = FrequencyWeightedMSELoss(dataset.frequency_array).to(device)
+    criterion = FrequencyWeightedMSELoss(
+        dataset.frequency_array,
+        n_low_freq=args.n_low_freq,
+        metal_low_freq_weight=args.metal_low_freq_weight,
+    ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=args.scheduler_factor, patience=args.scheduler_patience
@@ -264,6 +275,9 @@ def main():
                 'test_idx': test_idx,
                 'model_name': MODEL_NAME,
                 'use_log': args.use_log,
+                'n_low_freq': args.n_low_freq,
+                'metal_low_freq_weight': args.metal_low_freq_weight,
+                'metal_gap_threshold': args.metal_gap_threshold,
                 # Hyperparameters
                 'atom_fea_len': args.atom_fea_len,
                 'n_layers': args.n_layers,

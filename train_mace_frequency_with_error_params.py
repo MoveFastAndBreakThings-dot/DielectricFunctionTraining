@@ -41,7 +41,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, use_log=False, 
     total = 0.0
     n = 0
     last_parts = None
-    for batch_idx, (inputs, target, _) in enumerate(dataloader):
+    for batch_idx, (inputs, target, is_metal) in enumerate(dataloader):
         atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx = inputs
         atom_fea = atom_fea.to(device)
         nbr_fea = nbr_fea.to(device)
@@ -53,7 +53,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, use_log=False, 
         eps_out, abc_out = model(atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx)
 
         criterion.eps_pred_is_log = bool(use_log)
-        loss, parts = criterion(eps_out, abc_out, target)
+        loss, parts = criterion(eps_out, abc_out, target, is_metal)
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
@@ -75,7 +75,7 @@ def validate(model, dataloader, criterion, device, use_log=False):
     model.eval()
     total = 0.0
     n = 0
-    for inputs, target, _ in dataloader:
+    for inputs, target, is_metal in dataloader:
         atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx = inputs
         atom_fea = atom_fea.to(device)
         nbr_fea = nbr_fea.to(device)
@@ -85,7 +85,7 @@ def validate(model, dataloader, criterion, device, use_log=False):
 
         eps_out, abc_out = model(atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx)
         criterion.eps_pred_is_log = bool(use_log)
-        loss, _ = criterion(eps_out, abc_out, target)
+        loss, _ = criterion(eps_out, abc_out, target, is_metal)
         total += loss.item() * target.shape[0]
         n += target.shape[0]
     return total / max(n, 1)
@@ -118,6 +118,12 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--target_components", type=str, default="xx")
     parser.add_argument("--use_log", action="store_true", help="Model outputs log(ε); loss uses exp(output).")
+    parser.add_argument("--n_low_freq", type=int, default=0,
+                        help="Number of low-frequency points to discount for metals (0 = disabled)")
+    parser.add_argument("--metal_low_freq_weight", type=float, default=0.1,
+                        help="Loss weight for discounted low-freq points in metals")
+    parser.add_argument("--metal_gap_threshold", type=float, default=0.1,
+                        help="Band gap threshold (eV) below which a material is treated as metal")
 
     parser.add_argument("--atom_fea_len", type=int, default=128)
     parser.add_argument("--n_layers", type=int, default=4)
@@ -139,7 +145,8 @@ def main():
     args = parser.parse_args()
     target_components = tuple(args.target_components.split(","))
 
-    dataset = LMDBCrystalDataset(args.lmdb_path, target_components=target_components, use_kkr=True)
+    dataset = LMDBCrystalDataset(args.lmdb_path, target_components=target_components, use_kkr=True,
+                                  metal_gap_threshold=args.metal_gap_threshold)
     train_idx, val_idx, test_idx = train_val_test_split(len(dataset))
 
     train_ds = Subset(dataset, train_idx)
@@ -173,6 +180,8 @@ def main():
         eps_reduction="mae",
         sigma_reduction="mse",
         sigma_transform="log1p" if args.use_log else "none",
+        n_low_freq=args.n_low_freq,
+        metal_low_freq_weight=args.metal_low_freq_weight,
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -215,6 +224,9 @@ def main():
                     "test_idx": test_idx,
                     "model_name": MODEL_NAME,
                     "use_log": args.use_log,
+                    "n_low_freq": args.n_low_freq,
+                    "metal_low_freq_weight": args.metal_low_freq_weight,
+                    "metal_gap_threshold": args.metal_gap_threshold,
                     "atom_fea_len": args.atom_fea_len,
                     "n_layers": args.n_layers,
                     "h_fea_len": args.h_fea_len,
@@ -303,10 +315,15 @@ def main_stage2():
     alpha = ckpt.get("alpha", 3.0)
     sigma_transform = ckpt.get("sigma_transform", "log1p" if use_log else "none")
     target_components = ckpt.get("target_components", ("xx",))
+    n_low_freq = ckpt.get("n_low_freq", 0)
+    metal_low_freq_weight = ckpt.get("metal_low_freq_weight", 0.1)
+    metal_gap_threshold = ckpt.get("metal_gap_threshold", 0.1)
     print(f"Loaded: {args.checkpoint}")
     print(f"  use_log={use_log}  alpha={alpha}  sigma_transform={sigma_transform}")
+    print(f"  n_low_freq={n_low_freq}  metal_low_freq_weight={metal_low_freq_weight}")
 
-    dataset = LMDBCrystalDataset(args.lmdb_path, target_components=target_components, use_kkr=True)
+    dataset = LMDBCrystalDataset(args.lmdb_path, target_components=target_components, use_kkr=True,
+                                  metal_gap_threshold=metal_gap_threshold)
 
     # reuse exact same split as stage 1 so test set is untouched
     train_idx = ckpt.get("train_idx")
@@ -361,6 +378,8 @@ def main_stage2():
         eps_reduction="mae",
         sigma_reduction="mse",
         sigma_transform=sigma_transform,
+        n_low_freq=n_low_freq,
+        metal_low_freq_weight=metal_low_freq_weight,
     ).to(device)
     criterion.eps_pred_is_log = use_log
 
@@ -377,7 +396,7 @@ def main_stage2():
         last_sigma = None
         ctx = torch.enable_grad() if train else torch.no_grad()
         with ctx:
-            for batch_idx, (inputs, target, _) in enumerate(loader):
+            for batch_idx, (inputs, target, is_metal) in enumerate(loader):
                 af, nf, nfi, cai = inputs
                 af = af.to(device); nf = nf.to(device)
                 nfi = nfi.to(device)
@@ -388,7 +407,7 @@ def main_stage2():
                     optimizer.zero_grad()
 
                 eps_out, bc_out = model(af, nf, nfi, cai)
-                loss, parts = criterion(eps_out, bc_out, target)
+                loss, parts = criterion(eps_out, bc_out, target, is_metal)
 
                 if train:
                     loss.backward()
