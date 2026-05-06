@@ -14,7 +14,7 @@ class LMDBCrystalDataset(Dataset):
     Dataset that loads pre-computed crystal graphs and KKR data from LMDB.
     """
     
-    def __init__(self, lmdb_path, target_components=('xx',), use_kkr=True):
+    def __init__(self, lmdb_path, target_components=('xx',), use_kkr=True, metal_gap_threshold=None):
         """
         Parameters
         ----------
@@ -60,6 +60,7 @@ class LMDBCrystalDataset(Dataset):
             self.n_frequencies = metadata.get('n_frequencies', 0)
             self.frequency_array = self.energy_array
         
+        self.metal_gap_threshold = metal_gap_threshold
         self._txn = self.env.begin()
     
     def __len__(self):
@@ -88,7 +89,11 @@ class LMDBCrystalDataset(Dataset):
             else:
                 target = np.concatenate([np.stack(real_parts), np.stack(imag_parts)], axis=0)
         
-        return (atom_fea, nbr_fea, nbr_fea_idx), target, idx
+        is_metal = False
+        if self.metal_gap_threshold is not None:
+            is_metal = float(data.get('opt_gap', 1.0)) < self.metal_gap_threshold
+
+        return (atom_fea, nbr_fea, nbr_fea_idx), target, is_metal
     
     def get_sample_info(self, idx):
         """Get metadata for a specific sample."""
@@ -121,19 +126,22 @@ def collate_pool(dataset_list):
     batch_atom_fea, batch_nbr_fea, batch_nbr_fea_idx = [], [], []
     crystal_atom_idx, batch_target = [], []
     
+    batch_is_metal = []
     base_idx = 0
-    for (atom_fea, nbr_fea, nbr_fea_idx), target, _ in dataset_list:
+    for (atom_fea, nbr_fea, nbr_fea_idx), target, is_metal in dataset_list:
         n_atoms = atom_fea.shape[0]
         batch_atom_fea.append(torch.FloatTensor(atom_fea))
         batch_nbr_fea.append(torch.FloatTensor(nbr_fea))
         batch_nbr_fea_idx.append(torch.LongTensor(nbr_fea_idx) + base_idx)
         crystal_atom_idx.append(torch.LongTensor(list(range(base_idx, base_idx + n_atoms))))
         batch_target.append(torch.FloatTensor(target))
+        batch_is_metal.append(is_metal)
         base_idx += n_atoms
-    
+
+    is_metal_tensor = torch.tensor(batch_is_metal, dtype=torch.bool) if any(isinstance(m, bool) for m in batch_is_metal) else None
     return (
         torch.cat(batch_atom_fea, dim=0),
         torch.cat(batch_nbr_fea, dim=0),
         torch.cat(batch_nbr_fea_idx, dim=0),
         crystal_atom_idx
-    ), torch.stack(batch_target, dim=0), None
+    ), torch.stack(batch_target, dim=0), is_metal_tensor
