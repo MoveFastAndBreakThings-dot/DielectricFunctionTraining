@@ -266,35 +266,40 @@ if __name__ == "__main__":
 
 def main_stage2():
     """
-    Freeze the entire backbone + eps head of a pretrained FrequencyMACEWithABC,
-    then fine-tune only the (b,c) head (fc_bc + bc_pos) with pure sigma loss.
+    Load a pretrained FrequencyMACE backbone checkpoint, attach a fresh (b,c) head,
+    freeze the entire backbone + eps head, then train only fc_bc + bc_pos with pure
+    sigma loss.
 
-    The key insight: with the eps head frozen, the self-supervised target
-    |eps_pred - eps_true| is stable across batches, making it much easier
-    for the (b,c) head to learn crystal-specific error magnitudes.
+    Accepts either a FrequencyMACE checkpoint (from train_mace_frequency.py) or a
+    FrequencyMACEWithABC checkpoint. Backbone weights are loaded with strict=False so
+    the missing fc_bc/bc_pos keys are initialised fresh.
 
     Usage:
         python3 train_mace_frequency_with_error_params.py --stage2 \\
-            --checkpoint models/mace_kkr_with_abc_v3.pt \\
-            --model_name mace_kkr_with_abc_v3_stage2 \\
+            --checkpoint models/mace_kkr_v1.pt \\
+            --model_name mace_kkr_with_abc_stage2 \\
             --epochs 50 --lr 1e-3
     """
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage2", action="store_true")
     parser.add_argument("--checkpoint", type=str, required=True,
-                        help="Path to stage-1 checkpoint to load")
+                        help="Path to FrequencyMACE (or FrequencyMACEWithABC) checkpoint")
     parser.add_argument("--lmdb_path", type=str, default="processed_data/crystal_graphs.lmdb")
     parser.add_argument("--model_name", type=str, default="mace_kkr_with_abc_stage2")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-3,
-                        help="LR for (b,c) head only — can be higher than stage-1")
+                        help="LR for (b,c) head only — can be higher than backbone LR")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lambda_sigma", type=float, default=1.0)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--grad_clip_norm", type=float, default=1.0)
     parser.add_argument("--scheduler_patience", type=int, default=8)
     parser.add_argument("--scheduler_factor", type=float, default=0.5)
+    parser.add_argument("--abc_hidden", type=int, default=128,
+                        help="Hidden dim for (b,c) head (used when checkpoint is FrequencyMACE)")
+    parser.add_argument("--alpha", type=float, default=3.0,
+                        help="Fixed α in σ(ξ)=b/(ξ+c)^α (used when not in checkpoint)")
     args = parser.parse_args()
 
     import os
@@ -309,15 +314,16 @@ def main_stage2():
     os.makedirs("models", exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ---- load stage-1 checkpoint ----
+    # ---- load backbone checkpoint ----
     ckpt = torch.load(args.checkpoint, map_location=device)
     use_log = ckpt.get("use_log", False)
-    alpha = ckpt.get("alpha", 3.0)
+    alpha = ckpt.get("alpha", args.alpha)
     sigma_transform = ckpt.get("sigma_transform", "log1p" if use_log else "none")
     target_components = ckpt.get("target_components", ("xx",))
     n_low_freq = ckpt.get("n_low_freq", 0)
     metal_low_freq_weight = ckpt.get("metal_low_freq_weight", 0.1)
     metal_gap_threshold = ckpt.get("metal_gap_threshold", 0.1)
+    abc_hidden = ckpt.get("abc_hidden", args.abc_hidden)
     print(f"Loaded: {args.checkpoint}")
     print(f"  use_log={use_log}  alpha={alpha}  sigma_transform={sigma_transform}")
     print(f"  n_low_freq={n_low_freq}  metal_low_freq_weight={metal_low_freq_weight}")
@@ -325,7 +331,7 @@ def main_stage2():
     dataset = LMDBCrystalDataset(args.lmdb_path, target_components=target_components, use_kkr=True,
                                   metal_gap_threshold=metal_gap_threshold)
 
-    # reuse exact same split as stage 1 so test set is untouched
+    # reuse exact same split as backbone so test set is untouched
     train_idx = ckpt.get("train_idx")
     val_idx = ckpt.get("val_idx")
     test_idx = ckpt.get("test_idx")
@@ -338,7 +344,9 @@ def main_stage2():
     val_loader = DataLoader(Subset(dataset, val_idx), batch_size=args.batch_size,
                             shuffle=False, num_workers=0, collate_fn=collate_pool)
 
-    # ---- build model and load weights ----
+    # ---- build FrequencyMACEWithABC and load backbone weights ----
+    # strict=False so fc_bc/bc_pos (absent in a FrequencyMACE checkpoint) are left
+    # at their random initialisation while all backbone keys are copied over.
     model = FrequencyMACEWithABC(
         orig_atom_fea_len=ckpt["orig_atom_fea_len"],
         nbr_fea_len=ckpt["nbr_fea_len"],
@@ -349,9 +357,12 @@ def main_stage2():
         n_frequencies=ckpt["n_frequencies"],
         n_output_channels=ckpt["n_output_channels"],
         dropout=ckpt.get("dropout", 0.1),
-        abc_hidden=ckpt.get("abc_hidden", 128),
+        abc_hidden=abc_hidden,
     ).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    print(f"  Backbone loaded — missing keys (expected for fresh (b,c) head): {missing}")
+    if unexpected:
+        print(f"  Unexpected keys: {unexpected}")
 
     # ---- freeze everything except fc_bc and bc_pos ----
     frozen_modules = [model.embedding, model.layers, model.pool_to_fc,
@@ -465,7 +476,7 @@ def main_stage2():
                 "h_fea_len": ckpt.get("h_fea_len", 256),
                 "n_h": ckpt.get("n_h", 1),
                 "dropout": ckpt.get("dropout", 0.1),
-                "abc_hidden": ckpt.get("abc_hidden", 128),
+                "abc_hidden": abc_hidden,
                 "alpha": alpha,
                 "lambda_eps": 0.0,
                 "lambda_sigma": args.lambda_sigma,

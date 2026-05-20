@@ -228,6 +228,61 @@ def plot_residual_vs_sigma(samples, xi, alpha, save_path):
     print(f"  Saved: {save_path}")
 
 
+def plot_worst_fits(samples, xi, k_sigma, alpha, n_worst, save_path, sigma_transform="none"):
+    """
+    Grid of the n_worst crystals ranked by the bc-head sigma loss per crystal,
+    matching SpectrumAndPowerLawABCLoss exactly:
+      abs_err = |ε̂_lin − ε_true|          (linear, detached in training)
+      if sigma_transform == "log1p":  apply log1p to both abs_err and σ
+      loss = mean( (σ_t − abs_err_t)² )   (after transform)
+    """
+    def _transform(x):
+        if sigma_transform == "log1p":
+            return np.log1p(x)
+        if sigma_transform == "log":
+            return np.log(x + 1e-12)
+        return x
+
+    for s in samples:
+        sig = sigma_curve(xi, s["b"], s["c"], alpha)
+        abs_err = np.abs(s["eps_pred"] - s["eps_true"])
+        s["sigma_loss"] = float(np.mean((_transform(sig) - _transform(abs_err)) ** 2))
+
+    worst = sorted(samples, key=lambda s: s["sigma_loss"], reverse=True)[:n_worst]
+
+    ncols = min(4, n_worst)
+    nrows = (n_worst + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.5 * nrows), squeeze=False)
+
+    for idx, s in enumerate(worst):
+        ax = axes[idx // ncols][idx % ncols]
+        sig = sigma_curve(xi, s["b"], s["c"], alpha)
+        upper = s["eps_pred"] + k_sigma * sig
+        lower = np.maximum(s["eps_pred"] - k_sigma * sig, 1e-6)
+
+        ax.fill_between(xi, lower, upper, alpha=0.25, color="C0", label=f"±{k_sigma}σ")
+        ax.plot(xi, s["eps_pred"], color="C0", lw=1.5, label="Predicted")
+        ax.plot(xi, s["eps_true"], color="C1", lw=1.5, ls="--", label="Actual")
+        ax.set_xscale("log")
+        ax.set_xlabel("ξ (eV)")
+        ax.set_ylabel("ε(iξ)")
+        ax.set_ylim(bottom=0.9)
+        ax.set_title(f"{s.get('formula','')}  σ-loss={s['sigma_loss']:.4f}", fontsize=8)
+        ax.legend(fontsize=6, loc="upper right")
+
+    for idx in range(n_worst, nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    fig.suptitle(
+        f"Worst {n_worst} fits by bc-head sigma loss  mean(σ−|Δε|)²  (±{k_sigma}σ band shown)",
+        fontsize=12,
+    )
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {save_path}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, default="models/mace_kkr_with_abc_v2.pt")
@@ -239,6 +294,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--all_individual", action="store_true",
                         help="Save one PNG per crystal into plot_band/all_crystals/")
+    parser.add_argument("--n_worst", type=int, default=20,
+                        help="Plot this many worst-fit crystals (by max |Δε|/σ); 0 to skip")
     args = parser.parse_args()
 
     checkpoint = torch.load(args.model_path, map_location="cpu")
@@ -247,10 +304,11 @@ def main():
 
     use_log = checkpoint.get("use_log", False)
     alpha = checkpoint.get("alpha", 3.0)
+    sigma_transform = checkpoint.get("sigma_transform", "log1p" if use_log else "none")
     target_components = checkpoint.get("target_components", ("xx",))
 
     print(f"Model: {checkpoint.get('model_name', args.model_path)}")
-    print(f"  use_log={use_log}, alpha={alpha}, k_sigma={args.k_sigma}")
+    print(f"  use_log={use_log}, alpha={alpha}, k_sigma={args.k_sigma}, sigma_transform={sigma_transform}")
 
     dataset = LMDBCrystalDataset(args.lmdb_path, target_components=target_components, use_kkr=True)
     xi = np.asarray(dataset.kkr_xi_array, dtype=np.float64)
@@ -281,10 +339,11 @@ def main():
 
             eps_out, bc_out = model(atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx)
 
+            eps_raw_np = eps_out.cpu().numpy()
             if use_log:
-                eps_real = torch.exp(eps_out).cpu().numpy()
+                eps_real = np.exp(eps_raw_np)
             else:
-                eps_real = eps_out.cpu().numpy()
+                eps_real = eps_raw_np
 
             eps_true_np = target.cpu().numpy()
             bc_cpu = bc_out.cpu().numpy()
@@ -292,6 +351,12 @@ def main():
             for j in range(eps_real.shape[0]):
                 global_idx = test_idx[ds_idx]
                 info = dataset.get_sample_info(global_idx)
+                # training eps loss: compare model output directly to
+                # log(true) if use_log, else linear true
+                if use_log:
+                    train_err = np.abs(eps_raw_np[j, 0, :] - np.log(np.maximum(eps_true_np[j, 0, :], 1e-30)))
+                else:
+                    train_err = np.abs(eps_real[j, 0, :] - eps_true_np[j, 0, :])
                 samples.append({
                     "eps_pred": eps_real[j, 0, :],
                     "eps_true": eps_true_np[j, 0, :],
@@ -299,14 +364,13 @@ def main():
                     "c": float(bc_cpu[j, 1]),
                     "formula": info["formula"],
                     "mpid": info["mpid"],
+                    "train_mae": float(np.mean(train_err)),
                 })
                 ds_idx += 1
 
     dataset.close()
     print(f"Collected {len(samples)} test crystals. Generating plots...")
 
-    # pick n_examples: spread across sorted-by-loss to get variety
-    # sort by MAE so we pick low/mid/high error examples
     for s in samples:
         s["mae"] = float(np.mean(np.abs(s["eps_pred"] - s["eps_true"])))
 
@@ -330,6 +394,14 @@ def main():
         samples, xi, alpha,
         save_path=os.path.join(OUT_DIR, "residual_vs_sigma.png"),
     )
+
+    if args.n_worst > 0:
+        plot_worst_fits(
+            samples, xi, args.k_sigma, alpha,
+            n_worst=args.n_worst,
+            save_path=os.path.join(OUT_DIR, f"worst_{args.n_worst}_fits.png"),
+            sigma_transform=sigma_transform,
+        )
 
     if args.all_individual:
         print(f"\nSaving one plot per crystal ({len(samples)} total)...")

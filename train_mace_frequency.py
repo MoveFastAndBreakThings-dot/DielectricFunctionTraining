@@ -132,7 +132,7 @@ def main():
     parser.add_argument('--lmdb_path', type=str, default='processed_data/crystal_graphs.lmdb',
                         help='Path to LMDB database')
     parser.add_argument('--batch_size', type=int, default=16)
-    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--target_components', type=str, default='xx',
                         help='Dielectric components to predict (comma-separated: xx,yy,zz)')
