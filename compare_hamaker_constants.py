@@ -75,6 +75,29 @@ def hamaker_constant_zj(xi_ev, eps_xi, **kwargs):
     return hamaker_constant_j(xi_ev, eps_xi, **kwargs) * ZJ_PER_J
 
 
+def hamaker_pair_constant_j(xi_ev, eps1_xi, eps2_xi, t_k=T_K, xi_step_ev=XI_STEP_EV, n_max=500):
+    """
+    Pairwise Hamaker constant A_12 (joules) across vacuum at finite T.
+
+    A_12 = (3/2) k_B T [ (1/2) Δ_1(0)Δ_2(0) + Σ_{n≥1} Δ_1(n)Δ_2(n) ]
+    Δ_k(n) = (ε_k(iξ_n) − 1) / (ε_k(iξ_n) + 1)
+    """
+    _, delta1 = get_matsubara_sequences(
+        xi_ev, eps1_xi, t_k=t_k, xi_step_ev=xi_step_ev, n_max=n_max,
+    )
+    _, delta2 = get_matsubara_sequences(
+        xi_ev, eps2_xi, t_k=t_k, xi_step_ev=xi_step_ev, n_max=n_max,
+    )
+    pref = 1.5 * K_B_J * t_k
+    a = 0.5 * pref * delta1[0] * delta2[0]
+    a += pref * np.sum(delta1[1:] * delta2[1:])
+    return float(a)
+
+
+def hamaker_pair_constant_zj(xi_ev, eps1_xi, eps2_xi, **kwargs):
+    return hamaker_pair_constant_j(xi_ev, eps1_xi, eps2_xi, **kwargs) * ZJ_PER_J
+
+
 def matsubara_term_contributions_j(delta_n, t_k=T_K):
     """Per-mode contributions to A (joules). sum(terms) == hamaker_constant_j."""
     delta_n = np.asarray(delta_n, dtype=np.float64)
