@@ -213,6 +213,9 @@ def main():
         "use_log": use_log,
         "use_log_a": args.use_log_a,
         "freeze_encoder": args.freeze_encoder,
+        "n_low_freq": ckpt.get("n_low_freq", 0),
+        "metal_low_freq_weight": ckpt.get("metal_low_freq_weight", 0.1),
+        "metal_gap_threshold": ckpt.get("metal_gap_threshold"),
         "n_matsubara": n_matsubara,
         "temperature_k": temperature_k,
         "orig_atom_fea_len": ckpt["orig_atom_fea_len"],
@@ -227,6 +230,9 @@ def main():
         "dropout": ckpt.get("dropout", 0.1),
         "train_losses": train_losses,
         "val_losses": val_losses,
+        "train_idx": ckpt.get("train_idx"),
+        "val_idx": ckpt.get("val_idx"),
+        "test_idx": ckpt.get("test_idx"),
       }, model_path)
       print(f"  -> saved {model_path} (val={va:.6f})")
 
