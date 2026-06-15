@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from lmdb_dataset import LMDBCrystalDataset, collate_pool
+from model_loader import load_model
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONFIG  –  only these two lines need changing
@@ -23,43 +24,6 @@ MPID       = "mp-1234"
 
 LMDB_PATH = "processed_data/crystal_graphs.lmdb"
 OUT_DIR   = "plots_single"
-
-
-def _load_model(ckpt, device):
-    """Load whichever model variant is stored in the checkpoint."""
-    has_abc = "abc_hidden" in ckpt or any(
-        k.startswith("fc_abc") for k in ckpt.get("model_state_dict", {})
-    )
-    if has_abc:
-        from mace_model_error_params import FrequencyMACEWithABC
-        model = FrequencyMACEWithABC(
-            orig_atom_fea_len=ckpt["orig_atom_fea_len"],
-            nbr_fea_len=ckpt["nbr_fea_len"],
-            atom_fea_len=ckpt.get("atom_fea_len", 128),
-            n_layers=ckpt.get("n_layers", 4),
-            h_fea_len=ckpt.get("h_fea_len", 256),
-            n_h=ckpt.get("n_h", 1),
-            n_frequencies=ckpt["n_frequencies"],
-            n_output_channels=ckpt["n_output_channels"],
-            dropout=ckpt.get("dropout", 0.1),
-            abc_hidden=ckpt.get("abc_hidden", 128),
-        ).to(device)
-    else:
-        from mace_model import FrequencyMACE
-        model = FrequencyMACE(
-            orig_atom_fea_len=ckpt["orig_atom_fea_len"],
-            nbr_fea_len=ckpt["nbr_fea_len"],
-            atom_fea_len=ckpt.get("atom_fea_len", 128),
-            n_layers=ckpt.get("n_layers", 4),
-            h_fea_len=ckpt.get("h_fea_len", 256),
-            n_h=ckpt.get("n_h", 1),
-            n_frequencies=ckpt["n_frequencies"],
-            n_output_channels=ckpt["n_output_channels"],
-            dropout=ckpt.get("dropout", 0.1),
-        ).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-    return model, has_abc
 
 
 def _build_mpid_index(dataset, cache_path):
@@ -97,7 +61,7 @@ def main():
     use_log = ckpt.get("use_log", False)
     target_components = ckpt.get("target_components", ("xx",))
 
-    model, has_abc = _load_model(ckpt, device)
+    model, _ = load_model(ckpt, device)
 
     dataset = LMDBCrystalDataset(
         LMDB_PATH,
@@ -107,7 +71,7 @@ def main():
     )
     xi = np.asarray(dataset.kkr_xi_array, dtype=np.float64)
 
-    print(f"Model : {model_name}  (use_log={use_log}, abc={has_abc})")
+    print(f"Model : {model_name}  (use_log={use_log})")
     print(f"MPID  : {MPID}")
     idx = find_mpid_index(dataset, MPID, LMDB_PATH)
     if idx is None:
@@ -131,8 +95,7 @@ def main():
         target = target.to(device)
 
         out = model(af, nf, nfi, cai)
-        eps_raw = out[0] if has_abc else out
-        eps_pred = np.exp(eps_raw.cpu().numpy()[0, 0]) if use_log else eps_raw.cpu().numpy()[0, 0]
+        eps_pred = np.exp(out.cpu().numpy()[0, 0]) if use_log else out.cpu().numpy()[0, 0]
 
     eps_true = target.cpu().numpy()[0, 0]
     mae = float(np.mean(np.abs(eps_pred - eps_true)))

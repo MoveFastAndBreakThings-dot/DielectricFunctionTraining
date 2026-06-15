@@ -2,7 +2,7 @@
 Compute Hamaker constant A from ε(iξ) (KKR imaginary-axis dielectric data)
 and compare A from model predictions vs ground truth.
 
-Uses the same finite-temperature Matsubara Lifshitz formula as analyze_mace_error_params.py:
+Finite-temperature Matsubara Lifshitz formula:
 
     A = (3/2) k_B T [ Δ_0²/2 + Σ_{n≥1} Δ_n² ]     (J)
     Δ_n = (ε(iξ_n) − 1) / (ε(iξ_n) + 1)
@@ -75,6 +75,26 @@ def hamaker_constant_zj(xi_ev, eps_xi, **kwargs):
     return hamaker_constant_j(xi_ev, eps_xi, **kwargs) * ZJ_PER_J
 
 
+def matsubara_term_contributions_j(delta_n, t_k=T_K):
+    """Per-mode contributions to A (joules). sum(terms) == hamaker_constant_j."""
+    delta_n = np.asarray(delta_n, dtype=np.float64)
+    pref = 1.5 * K_B_J * t_k
+    terms = np.empty_like(delta_n)
+    terms[0] = 0.5 * pref * delta_n[0] ** 2
+    terms[1:] = pref * delta_n[1:] ** 2
+    return terms
+
+
+def terms_from_eps(xi_ev, eps_xi, t_k=T_K, xi_step_ev=XI_STEP_EV, n_max=500):
+    """Return (terms_j, xi_matsubara_ev) for n = 0 .. n_max-1."""
+    _, delta_n = get_matsubara_sequences(
+        xi_ev, eps_xi, t_k=t_k, xi_step_ev=xi_step_ev, n_max=n_max,
+    )
+    terms = matsubara_term_contributions_j(delta_n, t_k=t_k)
+    xi_m = np.arange(n_max, dtype=np.float64) * xi_step_ev
+    return terms, xi_m
+
+
 def train_val_test_split(n, train_ratio=0.8, val_ratio=0.1, seed=42):
     rng = np.random.RandomState(seed)
     idx = rng.permutation(n)
@@ -144,29 +164,8 @@ def report_hamaker_group(group_label, a_true, a_pred, metal_eps_threshold):
 
 
 def load_eps_model(ckpt, device):
-    has_abc = "abc_hidden" in ckpt or any(
-        k.startswith("fc_bc") for k in ckpt.get("model_state_dict", {})
-    )
-    if has_abc:
-        from mace_model_error_params import FrequencyMACEWithABC
-        model = FrequencyMACEWithABC(
-            orig_atom_fea_len=ckpt["orig_atom_fea_len"],
-            nbr_fea_len=ckpt["nbr_fea_len"],
-            atom_fea_len=ckpt.get("atom_fea_len", 128),
-            n_layers=ckpt.get("n_layers", 4),
-            h_fea_len=ckpt.get("h_fea_len", 256),
-            n_h=ckpt.get("n_h", 1),
-            n_frequencies=ckpt["n_frequencies"],
-            n_output_channels=ckpt["n_output_channels"],
-            dropout=ckpt.get("dropout", 0.1),
-            abc_hidden=ckpt.get("abc_hidden", 128),
-        ).to(device)
-    else:
-        model, _ = load_model(ckpt, device)
-        return model, False
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-    return model, True
+    model, _ = load_model(ckpt, device)
+    return model
 
 
 def main():
@@ -187,7 +186,7 @@ def main():
 
     ckpt = torch.load(args.model_path, map_location="cpu")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, has_abc = load_eps_model(ckpt, device)
+    model = load_eps_model(ckpt, device)
     use_log = ckpt.get("use_log", False)
     target_components = ckpt.get("target_components", ("xx",))
 
@@ -229,11 +228,10 @@ def main():
             target = target.to(device)
 
             out = model(af, nf, nfi, cai)
-            eps_raw = out[0] if has_abc else out
             if use_log:
-                eps_pred = torch.exp(eps_raw).cpu().numpy()
+                eps_pred = torch.exp(out).cpu().numpy()
             else:
-                eps_pred = eps_raw.cpu().numpy()
+                eps_pred = out.cpu().numpy()
             eps_true = target.cpu().numpy()
 
             bs = eps_true.shape[0]

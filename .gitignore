@@ -218,6 +218,3 @@ __marimo__/
 # Model checkpoints
 models/
 *.pt
-
-# our error plots
-dielectric_error_plots
