@@ -121,27 +121,35 @@ class LMDBCrystalDataset(Dataset):
         self.env.close()
 
 
-def collate_pool(dataset_list):
-    """Collate function for batching crystal graph data."""
+def collate_crystal_graphs(graph_list):
+    """Collate a list of (atom_fea, nbr_fea, nbr_fea_idx) into one batched graph."""
     batch_atom_fea, batch_nbr_fea, batch_nbr_fea_idx = [], [], []
-    crystal_atom_idx, batch_target = [], []
-    
-    batch_is_metal = []
+    crystal_atom_idx = []
     base_idx = 0
-    for (atom_fea, nbr_fea, nbr_fea_idx), target, is_metal in dataset_list:
+    for atom_fea, nbr_fea, nbr_fea_idx in graph_list:
         n_atoms = atom_fea.shape[0]
         batch_atom_fea.append(torch.FloatTensor(atom_fea))
         batch_nbr_fea.append(torch.FloatTensor(nbr_fea))
         batch_nbr_fea_idx.append(torch.LongTensor(nbr_fea_idx) + base_idx)
         crystal_atom_idx.append(torch.LongTensor(list(range(base_idx, base_idx + n_atoms))))
-        batch_target.append(torch.FloatTensor(target))
-        batch_is_metal.append(is_metal)
         base_idx += n_atoms
-
-    is_metal_tensor = torch.tensor(batch_is_metal, dtype=torch.bool) if any(isinstance(m, bool) for m in batch_is_metal) else None
     return (
         torch.cat(batch_atom_fea, dim=0),
         torch.cat(batch_nbr_fea, dim=0),
         torch.cat(batch_nbr_fea_idx, dim=0),
-        crystal_atom_idx
-    ), torch.stack(batch_target, dim=0), is_metal_tensor
+        crystal_atom_idx,
+    )
+
+
+def collate_pool(dataset_list):
+    """Collate function for batching crystal graph data."""
+    graphs = [item[0] for item in dataset_list]
+    inputs = collate_crystal_graphs(graphs)
+    batch_target = [torch.FloatTensor(item[1]) for item in dataset_list]
+    batch_is_metal = [item[2] for item in dataset_list]
+    is_metal_tensor = (
+        torch.tensor(batch_is_metal, dtype=torch.bool)
+        if any(isinstance(m, bool) for m in batch_is_metal)
+        else None
+    )
+    return inputs, torch.stack(batch_target, dim=0), is_metal_tensor

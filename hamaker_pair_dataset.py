@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from lmdb_dataset import collate_pool
+from lmdb_dataset import collate_crystal_graphs
 
 
 class HamakerPairDataset(Dataset):
@@ -39,8 +39,8 @@ def collate_hamaker_pairs(batch):
     batch_a = [item[0] for item in batch]
     batch_b = [item[1] for item in batch]
     a_true = torch.tensor([item[2] for item in batch], dtype=torch.float32)
-    inputs_a, _, _ = collate_pool(batch_a)
-    inputs_b, _, _ = collate_pool(batch_b)
+    inputs_a = collate_crystal_graphs(batch_a)
+    inputs_b = collate_crystal_graphs(batch_b)
     return inputs_a, inputs_b, a_true
 
 
