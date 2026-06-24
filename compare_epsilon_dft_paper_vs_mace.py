@@ -23,7 +23,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from compare_hamaker_constants import get_split_indices
-from gudarzi_mho import eps_mho_from_bandgap
+from gudarzi_mho import alpha_from_eq7, eps_mho_from_bandgap
 from lmdb_dataset import LMDBCrystalDataset, collate_pool
 from model_loader import load_model
 
@@ -168,7 +168,12 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--gap_field", type=str, default="opt_gap", choices=("opt_gap", "mbj_gap"))
     parser.add_argument("--metal_gap_threshold", type=float, default=0.1)
-    parser.add_argument("--alpha", type=float, default=1.7)
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=None,
+        help="Fixed α for all materials; default uses Eq. 7 with n=√ε∞",
+    )
     parser.add_argument("--a_pref", type=float, default=20.0)
     parser.add_argument("--out_csv", type=str, default=None)
     args = parser.parse_args()
@@ -206,7 +211,8 @@ def main():
     print(f"DFT reference : KKR ε(iξ) from {args.lmdb_path}")
     print(f"MHO Eg only   : C_UV = A·Eg^{{-1.2}}, ω_UV = B·Eg^{{0.736}}")
     print(f"MHO Eg+ε∞ DFT : C_UV = ε_DFT(ξ_min)−1, ω_UV from Eg  [fair crossover]")
-    print(f"  gap={args.gap_field}  α={args.alpha}  A={args.a_pref}  exclude gap < {args.metal_gap_threshold} eV")
+    alpha_desc = f"fixed {args.alpha}" if args.alpha is not None else "Eq. 7 (n=√ε∞)"
+    print(f"  gap={args.gap_field}  α={alpha_desc}  A={args.a_pref}  exclude gap < {args.metal_gap_threshold} eV")
     print(f"MACE          : {args.model_path} ({model_name})")
     if args.meta_path:
         print(f"MACE meta     : {args.meta_path} ({meta_name})")
@@ -233,17 +239,31 @@ def main():
             valid_mask.append(False)
             continue
         try:
+            c_uv_eg = args.a_pref * (gap ** -1.2)
+            eps_static = float(true[i, 0])
+            alpha_eg = (
+                args.alpha
+                if args.alpha is not None
+                else alpha_from_eq7(gap, c_uv_eg, formula=info["formula"])
+            )
+            alpha_epsinf = (
+                args.alpha
+                if args.alpha is not None
+                else alpha_from_eq7(
+                    gap, eps_static - 1.0, formula=info["formula"], eps_static=eps_static,
+                )
+            )
             pred_eg_list.append(
                 eps_mho_from_bandgap(
                     xi, gap, formula=info["formula"],
-                    alpha=args.alpha, a_pref=args.a_pref,
+                    alpha=alpha_eg, a_pref=args.a_pref,
                 )
             )
-            c_uv = float(true[i, 0]) - 1.0
+            c_uv = eps_static - 1.0
             pred_epsinf_list.append(
                 eps_mho_from_bandgap(
                     xi, gap, formula=info["formula"],
-                    alpha=args.alpha, c_uv=c_uv,
+                    alpha=alpha_epsinf, c_uv=c_uv,
                 )
             )
             valid_mask.append(True)
