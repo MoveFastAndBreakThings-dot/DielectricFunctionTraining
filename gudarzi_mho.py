@@ -33,11 +33,22 @@ def is_organic_formula(formula):
     return all(el in ORGANIC_ELEMENTS for el in tokens)
 
 
-def eps_mho_from_bandgap(xi, eg_ev, formula=None, alpha=DEFAULT_ALPHA, a_pref=A_INORGANIC):
+def eps_mho_from_bandgap(
+    xi,
+    eg_ev,
+    formula=None,
+    alpha=DEFAULT_ALPHA,
+    a_pref=A_INORGANIC,
+    c_uv=None,
+):
     """
-    Predict ε(iξ) on ascending xi grid (eV) using bandgap-only MHO model.
+    Predict ε(iξ) on ascending xi grid (eV) using the modified harmonic oscillator.
 
-    Returns array same shape as xi.
+    Parameters
+    ----------
+    c_uv : float, optional
+        Oscillator strength C_UV = ε∞ − 1. If None, use A·Eg^{-1.2} (bandgap only).
+        If set (e.g. from DFT ε at the lowest ξ), only ω_UV still comes from Eg.
     """
     xi = np.asarray(xi, dtype=np.float64)
     eg = float(eg_ev)
@@ -46,6 +57,7 @@ def eps_mho_from_bandgap(xi, eg_ev, formula=None, alpha=DEFAULT_ALPHA, a_pref=A_
 
     organic = is_organic_formula(formula) if formula is not None else False
     b = B_ORGANIC if organic else B_INORGANIC
-    c_uv = a_pref * (eg ** -1.2)
+    if c_uv is None:
+        c_uv = a_pref * (eg ** -1.2)
     omega_uv = b * (eg ** 0.736)
     return 1.0 + c_uv / (1.0 + (xi / omega_uv) ** alpha)
