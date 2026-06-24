@@ -218,3 +218,6 @@ __marimo__/
 # Model checkpoints
 models/
 *.pt
+
+# ignore research papers in repo
+*.pdf
