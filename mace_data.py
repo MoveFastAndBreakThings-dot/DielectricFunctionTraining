@@ -10,16 +10,16 @@ import numpy as np
 import torch
 
 try:
+    from mace.data.atomic_data import AtomicData
     from mace.data.neighborhood import get_neighborhood
     from mace.tools import AtomicNumberTable, atomic_numbers_to_indices, to_one_hot
     from mace.tools.torch_geometric.batch import Batch
-    from mace.tools.torch_geometric.data import Data
 
     MACE_AVAILABLE = True
 except ImportError:
     MACE_AVAILABLE = False
+    AtomicData = None
     Batch = None
-    Data = None
 
 
 def require_mace():
@@ -67,14 +67,31 @@ def structure_arrays_to_atomic_data(
         num_classes=len(z_table),
     )
 
-    return Data(
+    return AtomicData(
         edge_index=torch.tensor(edge_index, dtype=torch.long),
+        node_attrs=node_attrs.to(dtype),
         positions=torch.tensor(positions, dtype=dtype),
         shifts=torch.tensor(shifts, dtype=dtype),
         unit_shifts=torch.tensor(unit_shifts, dtype=dtype),
         cell=torch.tensor(cell_out, dtype=dtype),
-        node_attrs=node_attrs.to(dtype),
+        weight=None,
         head=torch.zeros((), dtype=torch.long),
+        energy_weight=None,
+        forces_weight=None,
+        stress_weight=None,
+        virials_weight=None,
+        dipole_weight=None,
+        charges_weight=None,
+        polarizability_weight=None,
+        forces=None,
+        energy=None,
+        stress=None,
+        virials=None,
+        dipole=None,
+        charges=None,
+        polarizability=None,
+        elec_temp=None,
+        pbc=torch.tensor([list(pbc)], dtype=torch.bool),
     )
 
 

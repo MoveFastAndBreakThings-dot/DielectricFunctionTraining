@@ -74,7 +74,7 @@ def get_neighbor_features(structure, radius, max_num_nbr, gdf):
 
 
 # ============================================================================
-# KKR (Kramers-Kronig Relation) - Fully Vectorized with numpy.trapz
+# KKR (Kramers-Kronig Relation) - Fully Vectorized trapezoidal integration
 # ============================================================================
 
 def apply_kkr(omega, epsilon_imag, xi_points=None, n_xi_points=500, cshift=1e-6):
@@ -83,7 +83,7 @@ def apply_kkr(omega, epsilon_imag, xi_points=None, n_xi_points=500, cshift=1e-6)
     
     ε(iξ) = 1 + (2/π) ∫₀^∞ [ω × ε₂(ω)] / (ω² + ξ²) dω
     
-    Uses broadcasting + numpy.trapz for speed.
+    Uses broadcasting + trapezoidal integration for speed.
     
     Parameters
     ----------
@@ -126,7 +126,7 @@ def apply_kkr(omega, epsilon_imag, xi_points=None, n_xi_points=500, cshift=1e-6)
     factor = omega_2d * eps_2d / (omega_2d**2 + xi_2d**2 + cshift_c)
     
     # Integrate along omega axis (axis=1) for each xi
-    int_res = np.real(np.trapz(factor, omega, axis=1))
+    int_res = np.real(np.trapezoid(factor, omega, axis=1))
     epsilon_kkr = 1.0 + 2.0 / pi * int_res
     
     return xi.astype(np.float32), epsilon_kkr.astype(np.float32)
