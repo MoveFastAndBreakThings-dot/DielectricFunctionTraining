@@ -31,8 +31,21 @@ def require_mace():
         )
 
 
-def node_feature_dim(num_interactions, hidden_irreps):
-    return num_interactions * o3.Irreps(hidden_irreps).dim
+def node_feature_dim(num_interactions, hidden_irreps, keep_last_layer_irreps=False):
+    """
+    Size of ``node_feats`` returned by ScaleShiftMACE (concat of all layers).
+
+    MACE keeps only scalar irreps on the final interaction by default, so the
+    last block contributes fewer channels than earlier ones.
+    """
+    ir = o3.Irreps(hidden_irreps)
+    full_dim = ir.dim
+    scalar_dim = ir.count(o3.Irrep(0, 1))
+    if keep_last_layer_irreps:
+        return num_interactions * full_dim
+    if num_interactions == 1:
+        return scalar_dim
+    return (num_interactions - 1) * full_dim + scalar_dim
 
 
 def build_mace_backbone(
