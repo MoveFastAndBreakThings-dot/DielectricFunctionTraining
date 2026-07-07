@@ -23,7 +23,8 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from compare_hamaker_constants import T_K, get_matsubara_sequences, get_split_indices
-from lmdb_dataset import LMDBCrystalDataset, collate_pool
+from lmdb_dataset import LMDBCrystalDataset, get_collate_fn
+from model_forward import model_forward
 from model_loader import load_model
 
 OUT_DIR = "epsilon_base_vs_meta"
@@ -31,25 +32,18 @@ OUT_DIR = "epsilon_base_vs_meta"
 
 def load_ckpt_model(path, device):
     ckpt = torch.load(path, map_location=device)
-    model, _ = load_model(ckpt, device)
-    return ckpt, model
+    model, model_type = load_model(ckpt, device)
+    return ckpt, model, model_type
 
 
 @torch.no_grad()
-def predict_eps_linear(model, loader, device, use_log):
+def predict_eps_linear(model, model_type, loader, device, use_log):
     pred_list, true_list = [], []
     for inputs, target, _ in loader:
-        af, nf, nfi, cai = inputs
-        af = af.to(device)
-        nf = nf.to(device)
-        nfi = nfi.to(device)
-        cai = [x.to(device) for x in cai]
         target = target.to(device)
-        out = model(af, nf, nfi, cai)[:, 0, :]
-        true_ch = target[:, 0, :]
-        pred_lin = torch.exp(out) if use_log else out
+        pred_lin = model_forward(model, model_type, inputs, device, use_log=use_log)
         pred_list.append(pred_lin.cpu().numpy())
-        true_list.append(true_ch.cpu().numpy())
+        true_list.append(target[:, 0, :].cpu().numpy())
     return np.concatenate(pred_list), np.concatenate(true_list)
 
 
@@ -139,9 +133,10 @@ def main():
     xi_step = 2 * np.pi * 8.617333e-5 * args.temperature_k
     xi_m = np.arange(args.n_matsubara, dtype=np.float64) * xi_step
 
-    ckpt_b, model_b = load_ckpt_model(args.base, device)
-    ckpt_m, model_m = load_ckpt_model(args.meta, device)
+    ckpt_b, model_b, model_type_b = load_ckpt_model(args.base, device)
+    ckpt_m, model_m, model_type_m = load_ckpt_model(args.meta, device)
     use_log = ckpt_b.get("use_log", False)
+    use_mace = ckpt_b.get("model_type", "CGCNN") == "MACE"
     target_components = tuple(ckpt_b.get("target_components", ("xx",)))
 
     dataset = LMDBCrystalDataset(
@@ -149,6 +144,8 @@ def main():
         target_components=target_components,
         use_kkr=True,
         metal_gap_threshold=ckpt_b.get("metal_gap_threshold"),
+        use_mace=use_mace,
+        mace_r_max=ckpt_b.get("mace_r_max"),
     )
     xi = np.asarray(dataset.kkr_xi_array, dtype=np.float64)
     split_idx = get_split_indices(ckpt_b, len(dataset), args.split)
@@ -157,18 +154,18 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=0,
-        collate_fn=collate_pool,
+        collate_fn=get_collate_fn(use_mace=use_mace),
     )
 
     print("=" * 64)
-    print(f"Base : {args.base}  ({ckpt_b.get('model_name', '')})")
-    print(f"Meta : {args.meta}  ({ckpt_m.get('model_name', '')})")
+    print(f"Base : {args.base}  ({ckpt_b.get('model_name', '')})  [{model_type_b}]")
+    print(f"Meta : {args.meta}  ({ckpt_m.get('model_name', '')})  [{model_type_m}]")
     print(f"Split: {args.split}  n={len(split_idx)}  T={args.temperature_k} K")
     print(f"Matsubara: n = 0 .. {args.n_matsubara - 1}  (cubic spline, same as Hamaker)")
     print("=" * 64)
 
-    pred_b, true = predict_eps_linear(model_b, loader, device, use_log)
-    pred_m, _ = predict_eps_linear(model_m, loader, device, use_log)
+    pred_b, true = predict_eps_linear(model_b, model_type_b, loader, device, use_log)
+    pred_m, _ = predict_eps_linear(model_m, model_type_m, loader, device, use_log)
 
     mpids = [dataset.get_sample_info(i)["mpid"] for i in split_idx]
     dataset.close()

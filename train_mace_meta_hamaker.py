@@ -18,9 +18,10 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from hamaker_pair_dataset import HamakerPairDataset, collate_hamaker_pairs, load_pair_splits
+from hamaker_pair_dataset import HamakerPairDataset, get_hamaker_collate, load_pair_splits
 from hamaker_torch import HamakerPairLoss
 from lmdb_dataset import LMDBCrystalDataset
+from model_forward import model_forward_train
 from model_loader import load_model
 
 MODEL_NAME = "mace_meta_hamaker_v1"
@@ -35,32 +36,21 @@ def set_trainable(model, freeze_encoder=False):
     p.requires_grad = name.startswith("fc_freq")
 
 
-def run_pairs(model, inputs_a, inputs_b, device, use_log):
+def run_pairs(model, model_type, inputs_a, inputs_b, device, use_log):
   """Forward both sides of each pair; return linear ε(iξ) for channel 0."""
-  af_a, nf_a, nfi_a, cai_a = inputs_a
-  af_b, nf_b, nfi_b, cai_b = inputs_b
-  af_a = af_a.to(device)
-  nf_a = nf_a.to(device)
-  nfi_a = nfi_a.to(device)
-  cai_a = [x.to(device) for x in cai_a]
-  af_b = af_b.to(device)
-  nf_b = nf_b.to(device)
-  nfi_b = nfi_b.to(device)
-  cai_b = [x.to(device) for x in cai_b]
-
-  out_a = model(af_a, nf_a, nfi_a, cai_a)[:, 0, :]
-  out_b = model(af_b, nf_b, nfi_b, cai_b)[:, 0, :]
+  out_a = model_forward_train(model, model_type, inputs_a, device)[:, 0, :]
+  out_b = model_forward_train(model, model_type, inputs_b, device)[:, 0, :]
   if use_log:
     return torch.exp(out_a), torch.exp(out_b)
   return out_a, out_b
 
 
-def train_epoch(model, loader, criterion, optimizer, device, use_log, grad_clip):
+def train_epoch(model, model_type, loader, criterion, optimizer, device, use_log, grad_clip):
   model.train()
   total, n = 0.0, 0
   for batch_idx, (inputs_a, inputs_b, a_true) in enumerate(loader):
     a_true = a_true.to(device)
-    eps_a, eps_b = run_pairs(model, inputs_a, inputs_b, device, use_log)
+    eps_a, eps_b = run_pairs(model, model_type, inputs_a, inputs_b, device, use_log)
     loss = criterion(eps_a, eps_b, a_true)
 
     optimizer.zero_grad()
@@ -79,12 +69,12 @@ def train_epoch(model, loader, criterion, optimizer, device, use_log, grad_clip)
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device, use_log):
+def evaluate(model, model_type, loader, criterion, device, use_log):
   model.eval()
   total, n = 0.0, 0
   for inputs_a, inputs_b, a_true in loader:
     a_true = a_true.to(device)
-    eps_a, eps_b = run_pairs(model, inputs_a, inputs_b, device, use_log)
+    eps_a, eps_b = run_pairs(model, model_type, inputs_a, inputs_b, device, use_log)
     loss = criterion(eps_a, eps_b, a_true)
     bs = a_true.shape[0]
     total += loss.item() * bs
@@ -137,15 +127,19 @@ def main():
   device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
   ckpt = torch.load(args.backbone, map_location=device)
   use_log = ckpt.get("use_log", False)
+  use_mace = ckpt.get("model_type", "CGCNN") == "MACE"
 
   crystal_ds = LMDBCrystalDataset(
     lmdb_path,
     target_components=target_components,
     use_kkr=True,
     metal_gap_threshold=ckpt.get("metal_gap_threshold"),
+    use_mace=use_mace,
+    mace_r_max=ckpt.get("mace_r_max"),
   )
   splits = load_pair_splits(args.pairs_dir)
   pairs_npz = os.path.join(args.pairs_dir, "pairs.npz")
+  hamaker_collate = get_hamaker_collate(use_mace=use_mace)
 
   train_ds = HamakerPairDataset(crystal_ds, pairs_npz, splits["train"])
   val_ds = HamakerPairDataset(crystal_ds, pairs_npz, splits["val"])
@@ -153,21 +147,21 @@ def main():
 
   train_loader = DataLoader(
     train_ds, batch_size=args.batch_size, shuffle=True,
-    num_workers=0, collate_fn=collate_hamaker_pairs,
+    num_workers=0, collate_fn=hamaker_collate,
   )
   val_loader = DataLoader(
     val_ds, batch_size=args.batch_size, shuffle=False,
-    num_workers=0, collate_fn=collate_hamaker_pairs,
+    num_workers=0, collate_fn=hamaker_collate,
   )
   test_loader = DataLoader(
     test_ds, batch_size=args.batch_size, shuffle=False,
-    num_workers=0, collate_fn=collate_hamaker_pairs,
+    num_workers=0, collate_fn=hamaker_collate,
   )
 
-  model, _ = load_model(ckpt, device)
+  model, model_type = load_model(ckpt, device)
   set_trainable(model, freeze_encoder=args.freeze_encoder)
   n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-  print(f"Backbone: {args.backbone}  use_log={use_log}  trainable params: {n_trainable:,}")
+  print(f"Backbone: {args.backbone}  type={model_type}  use_log={use_log}  trainable params: {n_trainable:,}")
   print(f"Pairs: train={len(train_ds)}  val={len(val_ds)}  test={len(test_ds)}")
 
   criterion = HamakerPairLoss(
@@ -192,8 +186,8 @@ def main():
 
   for epoch in range(args.epochs):
     print(f"\nEpoch {epoch + 1}/{args.epochs}")
-    tr = train_epoch(model, train_loader, criterion, optimizer, device, use_log, args.grad_clip)
-    va = evaluate(model, val_loader, criterion, device, use_log)
+    tr = train_epoch(model, model_type, train_loader, criterion, optimizer, device, use_log, args.grad_clip)
+    va = evaluate(model, model_type, val_loader, criterion, device, use_log)
     scheduler.step(va)
     train_losses.append(tr)
     val_losses.append(va)
@@ -206,6 +200,7 @@ def main():
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "val_loss": va,
+        "model_type": model_type,
         "backbone_path": args.backbone,
         "pairs_dir": args.pairs_dir,
         "meta_objective": "hamaker_pair",
@@ -218,8 +213,13 @@ def main():
         "metal_gap_threshold": ckpt.get("metal_gap_threshold"),
         "n_matsubara": n_matsubara,
         "temperature_k": temperature_k,
-        "orig_atom_fea_len": ckpt["orig_atom_fea_len"],
-        "nbr_fea_len": ckpt["nbr_fea_len"],
+        "mace_r_max": ckpt.get("mace_r_max"),
+        "mace_num_interactions": ckpt.get("mace_num_interactions"),
+        "mace_hidden_irreps": ckpt.get("mace_hidden_irreps"),
+        "mace_max_ell": ckpt.get("mace_max_ell"),
+        "mace_correlation": ckpt.get("mace_correlation"),
+        "orig_atom_fea_len": ckpt.get("orig_atom_fea_len"),
+        "nbr_fea_len": ckpt.get("nbr_fea_len"),
         "n_frequencies": ckpt["n_frequencies"],
         "n_output_channels": ckpt["n_output_channels"],
         "target_components": target_components,
@@ -237,7 +237,7 @@ def main():
       print(f"  -> saved {model_path} (val={va:.6f})")
 
   plot_losses(train_losses, val_losses, f"models/{args.model_name}_loss.png")
-  test_loss = evaluate(model, test_loader, criterion, device, use_log)
+  test_loss = evaluate(model, model_type, test_loader, criterion, device, use_log)
   print(f"\nTest Hamaker loss: {test_loss:.6f}")
   crystal_ds.close()
 

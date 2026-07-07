@@ -1,23 +1,18 @@
 """
-MACE Model Implementation
-For frequency-dependent property prediction on crystal structures.
+CGCNN-style graph model for frequency-dependent ε(iξ) prediction.
 
-MACE (Many-body Atomic Cluster Expansion) uses message passing with
-equivariant features and many-body interactions.
-Compatible with the same data format as CGCNN.
+This is NOT the official ACEsuit MACE (E(3)-equivariant many-body expansion).
+For that, use ``mace_official_model.OfficialFrequencyMACE`` with ``--model mace``.
+
+Data format matches the original CGCNN pipeline (atom_fea, nbr_fea, nbr_fea_idx).
 """
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-import math
 
 
-class MACELayer(nn.Module):
-    """
-    MACE message passing layer with many-body interactions.
-    """
+class CGCNNLayer(nn.Module):
+    """CGCNN-style gated message passing layer (distance graph, scalar features)."""
     def __init__(self, atom_fea_len, nbr_fea_len, dropout=0.1):
         """
         Parameters
@@ -29,7 +24,7 @@ class MACELayer(nn.Module):
         dropout: float
             Dropout probability
         """
-        super(MACELayer, self).__init__()
+        super(CGCNNLayer, self).__init__()
         self.atom_fea_len = atom_fea_len
         self.nbr_fea_len = nbr_fea_len
         
@@ -81,7 +76,7 @@ class MACELayer(nn.Module):
         message_input = torch.cat([atom_fea_expanded, atom_nbr_fea, nbr_fea], dim=2)  # (N, M, 2*atom_fea_len + nbr_fea_len)
         messages = self.message_net(message_input)  # (N, M, atom_fea_len)
         
-        # Aggregate messages (sum aggregation for MACE)
+        # Aggregate messages (sum over neighbors)
         aggregated_messages = torch.sum(messages, dim=1)  # (N, atom_fea_len)
         
         # Update atom features: concatenate [atom_i, aggregated_messages]
@@ -95,16 +90,13 @@ class MACELayer(nn.Module):
         return atom_fea
 
 
-class FrequencyMACE(nn.Module):
-    """
-    MACE model for frequency-dependent property prediction.
-    Uses message passing with many-body interactions.
-    """
+class FrequencyCGCNN(nn.Module):
+    """CGCNN-style model: crystal graph → pooled embedding → full ε(iξ) curve."""
     def __init__(self, orig_atom_fea_len, nbr_fea_len,
                  atom_fea_len=128, n_layers=4, h_fea_len=256,
                  n_h=1, n_frequencies=4999, n_output_channels=2, dropout=0.1):
         """
-        Initialize FrequencyMACE.
+        Initialize FrequencyCGCNN.
         
         Parameters
         ----------
@@ -127,7 +119,7 @@ class FrequencyMACE(nn.Module):
         dropout: float
             Dropout probability
         """
-        super(FrequencyMACE, self).__init__()
+        super(FrequencyCGCNN, self).__init__()
         self.n_frequencies = n_frequencies
         self.n_output_channels = n_output_channels
         
@@ -136,7 +128,7 @@ class FrequencyMACE(nn.Module):
         
         # Message passing layers
         self.layers = nn.ModuleList([
-            MACELayer(atom_fea_len, nbr_fea_len, dropout)
+            CGCNNLayer(atom_fea_len, nbr_fea_len, dropout)
             for _ in range(n_layers)
         ])
         
@@ -236,4 +228,9 @@ class FrequencyMACE(nn.Module):
         summed_fea = [torch.mean(atom_fea[idx], dim=0, keepdim=True)
                       for idx in crystal_atom_idx]
         return torch.cat(summed_fea, dim=0)
+
+
+# Backward-compatible aliases (old checkpoints / scripts used these names)
+MACELayer = CGCNNLayer
+FrequencyMACE = FrequencyCGCNN
 

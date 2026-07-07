@@ -24,7 +24,8 @@ import torch
 from scipy.interpolate import interp1d
 from torch.utils.data import DataLoader, Subset
 
-from lmdb_dataset import LMDBCrystalDataset, collate_pool
+from lmdb_dataset import LMDBCrystalDataset, get_collate_fn
+from model_forward import model_forward
 from model_loader import load_model
 
 T_K = 300.0
@@ -187,8 +188,8 @@ def report_hamaker_group(group_label, a_true, a_pred, metal_eps_threshold):
 
 
 def load_eps_model(ckpt, device):
-    model, _ = load_model(ckpt, device)
-    return model
+    model, model_type = load_model(ckpt, device)
+    return model, model_type
 
 
 def main():
@@ -209,11 +210,12 @@ def main():
 
     ckpt = torch.load(args.model_path, map_location="cpu")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_eps_model(ckpt, device)
+    model, model_type = load_eps_model(ckpt, device)
     use_log = ckpt.get("use_log", False)
+    use_mace = model_type == "MACE"
     target_components = ckpt.get("target_components", ("xx",))
 
-    print(f"Model: {ckpt.get('model_name', args.model_path)}")
+    print(f"Model: {ckpt.get('model_name', args.model_path)} ({model_type})")
     print(f"  split={args.split}  use_log={use_log}  T={args.temperature_k} K")
     print(f"  n_matsubara={args.n_matsubara}  ξ_step={xi_step_ev:.4f} eV")
 
@@ -222,6 +224,8 @@ def main():
         target_components=target_components,
         use_kkr=True,
         metal_gap_threshold=ckpt.get("metal_gap_threshold"),
+        use_mace=use_mace,
+        mace_r_max=ckpt.get("mace_r_max"),
     )
     xi = np.asarray(dataset.kkr_xi_array, dtype=np.float64)
 
@@ -231,7 +235,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=0,
-        collate_fn=collate_pool,
+        collate_fn=get_collate_fn(use_mace=use_mace),
     )
 
     hamaker_kw = dict(t_k=args.temperature_k, xi_step_ev=xi_step_ev, n_max=args.n_matsubara)
@@ -243,18 +247,9 @@ def main():
     with torch.no_grad():
         batch_start = 0
         for inputs, target, _ in loader:
-            af, nf, nfi, cai = inputs
-            af = af.to(device)
-            nf = nf.to(device)
-            nfi = nfi.to(device)
-            cai = [x.to(device) for x in cai]
             target = target.to(device)
-
-            out = model(af, nf, nfi, cai)
-            if use_log:
-                eps_pred = torch.exp(out).cpu().numpy()
-            else:
-                eps_pred = out.cpu().numpy()
+            eps_pred = model_forward(model, model_type, inputs, device, use_log=use_log)
+            eps_pred = eps_pred.unsqueeze(1).cpu().numpy()
             eps_true = target.cpu().numpy()
 
             bs = eps_true.shape[0]

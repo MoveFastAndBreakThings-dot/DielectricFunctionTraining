@@ -35,13 +35,20 @@ class HamakerPairDataset(Dataset):
 
 
 def collate_hamaker_pairs(batch):
-    """Collate P pairs into one batched forward pass (2P crystals)."""
+    """Collate P pairs into one batched forward pass (2P crystals, CGCNN)."""
     batch_a = [item[0] for item in batch]
     batch_b = [item[1] for item in batch]
     a_true = torch.tensor([item[2] for item in batch], dtype=torch.float32)
     inputs_a = collate_crystal_graphs(batch_a)
     inputs_b = collate_crystal_graphs(batch_b)
     return inputs_a, inputs_b, a_true
+
+
+def get_hamaker_collate(use_mace=False):
+    if use_mace:
+        from mace_data import collate_mace_hamaker_pairs
+        return collate_mace_hamaker_pairs
+    return collate_hamaker_pairs
 
 
 def load_pair_splits(pairs_dir):

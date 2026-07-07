@@ -36,7 +36,8 @@ from compare_hamaker_constants import (
     load_eps_model,
     terms_from_eps,
 )
-from lmdb_dataset import LMDBCrystalDataset, collate_pool
+from lmdb_dataset import LMDBCrystalDataset, get_collate_fn
+from model_forward import model_forward_train
 
 OUT_DIR = "error_across_frequencies_hamaker_constant"
 
@@ -54,7 +55,7 @@ def cumulative_hamaker_zj(xi_ev, eps_xi, **term_kw):
     return cum, terms_zj, xi_m
 
 
-def collect_terms(loader, split_idx, dataset, model, use_log, device, xi, term_kw):
+def collect_terms(loader, split_idx, dataset, model, model_type, use_log, device, xi, term_kw):
     """Return terms_true, terms_pred (N, n_max) zJ, eps_low, mpids, formulas."""
     terms_true_list, terms_pred_list = [], []
     eps_low_list, mpids, formulas = [], [], []
@@ -62,14 +63,8 @@ def collect_terms(loader, split_idx, dataset, model, use_log, device, xi, term_k
     with torch.no_grad():
         batch_start = 0
         for inputs, target, _ in loader:
-            af, nf, nfi, cai = inputs
-            af = af.to(device)
-            nf = nf.to(device)
-            nfi = nfi.to(device)
-            cai = [x.to(device) for x in cai]
             target = target.to(device)
-
-            out = model(af, nf, nfi, cai)
+            out = model_forward_train(model, model_type, inputs, device)
             eps_pred = torch.exp(out).cpu().numpy() if use_log else out.cpu().numpy()
             eps_true = target.cpu().numpy()
 
@@ -244,8 +239,9 @@ def main():
 
     ckpt = torch.load(args.model_path, map_location="cpu")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_eps_model(ckpt, device)
+    model, model_type = load_eps_model(ckpt, device)
     use_log = ckpt.get("use_log", False)
+    use_mace = model_type == "MACE"
     target_components = ckpt.get("target_components", ("xx",))
     model_stem = os.path.splitext(os.path.basename(args.model_path))[0]
 
@@ -254,6 +250,8 @@ def main():
         target_components=target_components,
         use_kkr=True,
         metal_gap_threshold=ckpt.get("metal_gap_threshold"),
+        use_mace=use_mace,
+        mace_r_max=ckpt.get("mace_r_max"),
     )
     xi = np.asarray(dataset.kkr_xi_array, dtype=np.float64)
     xi_m = np.arange(args.n_matsubara, dtype=np.float64) * xi_step_ev
@@ -265,14 +263,14 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=0,
-        collate_fn=collate_pool,
+        collate_fn=get_collate_fn(use_mace=use_mace),
     )
 
-    print(f"Model: {ckpt.get('model_name', args.model_path)}  split={args.split}")
+    print(f"Model: {ckpt.get('model_name', args.model_path)} ({model_type})  split={args.split}")
     print(f"  n_matsubara={args.n_matsubara}  n_plot={n_plot}  → {args.out_dir}/")
 
     terms_true, terms_pred, eps_low, mpids, formulas = collect_terms(
-        loader, split_idx, dataset, model, use_log, device, xi, term_kw,
+        loader, split_idx, dataset, model, model_type, use_log, device, xi, term_kw,
     )
     dataset.close()
 

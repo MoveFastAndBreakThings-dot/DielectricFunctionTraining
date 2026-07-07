@@ -19,10 +19,11 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from compare_hamaker_constants import get_split_indices
-from hamaker_pair_dataset import HamakerPairDataset, collate_hamaker_pairs, load_pair_splits
+from hamaker_pair_dataset import HamakerPairDataset, get_hamaker_collate, load_pair_splits
 from hamaker_torch import ZJ_PER_J, hamaker_pair_j_from_eps
-from lmdb_dataset import LMDBCrystalDataset, collate_pool
+from lmdb_dataset import LMDBCrystalDataset, get_collate_fn
 from losses import FrequencyWeightedMSELoss
+from model_forward import model_forward_train
 from model_loader import load_model
 
 K_B_EV = 8.617333e-5
@@ -38,43 +39,27 @@ def predict_pair_hamaker_zj(xi_grid, eps1, eps2, xi_matsubara, temperature_k):
 
 
 @torch.no_grad()
-def run_pairs(model, inputs_a, inputs_b, device, use_log):
-    af_a, nf_a, nfi_a, cai_a = inputs_a
-    af_b, nf_b, nfi_b, cai_b = inputs_b
-    af_a = af_a.to(device)
-    nf_a = nf_a.to(device)
-    nfi_a = nfi_a.to(device)
-    cai_a = [x.to(device) for x in cai_a]
-    af_b = af_b.to(device)
-    nf_b = nf_b.to(device)
-    nfi_b = nfi_b.to(device)
-    cai_b = [x.to(device) for x in cai_b]
-
-    out_a = model(af_a, nf_a, nfi_a, cai_a)[:, 0, :]
-    out_b = model(af_b, nf_b, nfi_b, cai_b)[:, 0, :]
+def run_pairs(model, model_type, inputs_a, inputs_b, device, use_log):
+    out_a = model_forward_train(model, model_type, inputs_a, device)[:, 0, :]
+    out_b = model_forward_train(model, model_type, inputs_b, device)[:, 0, :]
     if use_log:
         return torch.exp(out_a), torch.exp(out_b)
     return out_a, out_b
 
 
 @torch.no_grad()
-def eval_core_loss(model, loader, criterion, device, use_log):
+def eval_core_loss(model, model_type, loader, criterion, device, use_log):
     """Return (mean loss, per-sample losses) using main-training objective."""
     per_sample = []
     total, n = 0.0, 0
     for inputs, target, is_metal in loader:
-        af, nf, nfi, cai = inputs
-        af = af.to(device)
-        nf = nf.to(device)
-        nfi = nfi.to(device)
-        cai = [x.to(device) for x in cai]
         target = target.to(device)
         if use_log:
             target = torch.log(target)
         if is_metal is not None:
             is_metal = is_metal.to(device)
 
-        pred = model(af, nf, nfi, cai)
+        pred = model_forward_train(model, model_type, inputs, device)
         loss = criterion(pred, target, is_metal)
         bs = target.shape[0]
         total += loss.item() * bs
@@ -92,11 +77,11 @@ def eval_core_loss(model, loader, criterion, device, use_log):
 
 
 @torch.no_grad()
-def collect_pair_errors(model, loader, xi_grid, xi_matsubara, temperature_k, device, use_log):
+def collect_pair_errors(model, model_type, loader, xi_grid, xi_matsubara, temperature_k, device, use_log):
     a_true_list, a_pred_list = [], []
     for inputs_a, inputs_b, a_true in loader:
         a_true = a_true.to(device)
-        eps_a, eps_b = run_pairs(model, inputs_a, inputs_b, device, use_log)
+        eps_a, eps_b = run_pairs(model, model_type, inputs_a, inputs_b, device, use_log)
         a_pred = predict_pair_hamaker_zj(
             xi_grid, eps_a, eps_b, xi_matsubara, temperature_k,
         )
@@ -154,13 +139,16 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(args.model_path, map_location=device)
     use_log = ckpt.get("use_log", False)
-    model, _ = load_model(ckpt, device)
+    model, model_type = load_model(ckpt, device)
+    use_mace = model_type == "MACE"
 
     crystal_ds = LMDBCrystalDataset(
         lmdb_path,
         target_components=target_components,
         use_kkr=True,
         metal_gap_threshold=ckpt.get("metal_gap_threshold"),
+        use_mace=use_mace,
+        mace_r_max=ckpt.get("mace_r_max"),
     )
 
     model_name = ckpt.get("model_name", os.path.basename(args.model_path))
@@ -169,6 +157,7 @@ def main():
     print("=" * 60)
     print(f"Model      : {args.model_path}")
     print(f"  name     : {model_name}")
+    print(f"  type     : {model_type}")
     print(f"  objective: {meta_obj}")
     print(f"  use_log  : {use_log}")
     print("=" * 60)
@@ -182,7 +171,7 @@ def main():
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=0,
-            collate_fn=collate_pool,
+            collate_fn=get_collate_fn(use_mace=use_mace),
         )
         criterion = FrequencyWeightedMSELoss(
             crystal_ds.frequency_array,
@@ -199,7 +188,7 @@ def main():
         print(f"  split: {args.core_split}  n_crystals={len(core_idx)}")
 
         core_mean, core_per_sample = eval_core_loss(
-            model, core_loader, criterion, device, use_log,
+            model, model_type, core_loader, criterion, device, use_log,
         )
         ckpt_val = ckpt.get("val_loss")
         val_note = f"  (checkpoint val_loss={ckpt_val:.6f})" if ckpt_val is not None else ""
@@ -219,7 +208,7 @@ def main():
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=0,
-            collate_fn=collate_hamaker_pairs,
+            collate_fn=get_hamaker_collate(use_mace=use_mace),
         )
 
         xi_grid = torch.tensor(crystal_ds.kkr_xi_array, dtype=torch.float32, device=device)
@@ -233,7 +222,7 @@ def main():
         print(f"  T={temperature_k} K  n_matsubara={n_matsubara}")
 
         a_true, a_pred, rel_pct, abs_rel_pct = collect_pair_errors(
-            model, pair_loader, xi_grid, xi_matsubara, temperature_k, device, use_log,
+            model, model_type, pair_loader, xi_grid, xi_matsubara, temperature_k, device, use_log,
         )
 
         mae_zj = float(np.mean(np.abs(a_pred - a_true)))

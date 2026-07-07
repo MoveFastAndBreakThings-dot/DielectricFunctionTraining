@@ -24,7 +24,8 @@ from torch.utils.data import DataLoader, Subset
 
 from compare_hamaker_constants import get_split_indices
 from gudarzi_mho import alpha_from_eq7, eps_mho_from_bandgap
-from lmdb_dataset import LMDBCrystalDataset, collate_pool
+from lmdb_dataset import LMDBCrystalDataset, get_collate_fn
+from model_forward import model_forward
 from model_loader import load_model
 
 PERCENTILES = [5, 25, 50, 75, 95]
@@ -32,22 +33,16 @@ PERCENTILES = [5, 25, 50, 75, 95]
 
 def load_mace(path, device):
     ckpt = torch.load(path, map_location=device)
-    model, _ = load_model(ckpt, device)
-    return ckpt, model
+    model, model_type = load_model(ckpt, device)
+    return ckpt, model, model_type
 
 
 @torch.no_grad()
-def predict_mace(model, loader, device, use_log):
+def predict_mace(model, model_type, loader, device, use_log):
     pred_list, true_list = [], []
     for inputs, target, _ in loader:
-        af, nf, nfi, cai = inputs
-        af = af.to(device)
-        nf = nf.to(device)
-        nfi = nfi.to(device)
-        cai = [x.to(device) for x in cai]
         target = target.to(device)
-        out = model(af, nf, nfi, cai)[:, 0, :]
-        pred_lin = torch.exp(out) if use_log else out
+        pred_lin = model_forward(model, model_type, inputs, device, use_log=use_log)
         pred_list.append(pred_lin.cpu().numpy())
         true_list.append(target[:, 0, :].cpu().numpy())
     return np.concatenate(pred_list), np.concatenate(true_list)
@@ -179,15 +174,17 @@ def main():
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt, model = load_mace(args.model_path, device)
+    ckpt, model, model_type = load_mace(args.model_path, device)
     use_log = ckpt.get("use_log", False)
+    use_mace = model_type == "MACE"
     target_components = tuple(ckpt.get("target_components", ("xx",)))
 
     meta_pred = None
     meta_name = None
     ckpt_m = None
+    model_type_m = None
     if args.meta_path:
-        ckpt_m, model_m = load_mace(args.meta_path, device)
+        ckpt_m, model_m, model_type_m = load_mace(args.meta_path, device)
         meta_name = ckpt_m.get("model_name", os.path.basename(args.meta_path))
 
     dataset = LMDBCrystalDataset(
@@ -195,6 +192,8 @@ def main():
         target_components=target_components,
         use_kkr=True,
         metal_gap_threshold=ckpt.get("metal_gap_threshold"),
+        use_mace=use_mace,
+        mace_r_max=ckpt.get("mace_r_max"),
     )
     xi = np.asarray(dataset.kkr_xi_array, dtype=np.float64)
     split_idx = get_split_indices(ckpt, len(dataset), args.split)
@@ -203,7 +202,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=0,
-        collate_fn=collate_pool,
+        collate_fn=get_collate_fn(use_mace=use_mace),
     )
 
     model_name = ckpt.get("model_name", os.path.basename(args.model_path))
@@ -213,15 +212,18 @@ def main():
     print(f"MHO Eg+ε∞ DFT : C_UV = ε_DFT(ξ_min)−1, ω_UV from Eg  [fair crossover]")
     alpha_desc = f"fixed {args.alpha}" if args.alpha is not None else "Eq. 7 (n=√ε∞)"
     print(f"  gap={args.gap_field}  α={alpha_desc}  A={args.a_pref}  exclude gap < {args.metal_gap_threshold} eV")
-    print(f"MACE          : {args.model_path} ({model_name})")
+    print(f"Backend        : {model_type}")
+    print(f"MACE/CGCNN     : {args.model_path} ({model_name})")
     if args.meta_path:
         print(f"MACE meta     : {args.meta_path} ({meta_name})")
     print(f"Split         : {args.split}  n={len(split_idx)}")
     print("=" * 72)
 
-    pred_mace, true = predict_mace(model, loader, device, use_log)
+    pred_mace, true = predict_mace(model, model_type, loader, device, use_log)
     if args.meta_path:
-        meta_pred, _ = predict_mace(model_m, loader, device, ckpt_m.get("use_log", use_log))
+        meta_pred, _ = predict_mace(
+            model_m, model_type_m, loader, device, ckpt_m.get("use_log", use_log),
+        )
 
     mpids, formulas, gaps = [], [], []
     pred_eg_list, pred_epsinf_list, valid_mask = [], [], []
