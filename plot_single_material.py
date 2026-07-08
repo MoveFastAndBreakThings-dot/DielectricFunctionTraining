@@ -12,7 +12,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from lmdb_dataset import LMDBCrystalDataset, collate_pool
+from lmdb_dataset import LMDBCrystalDataset, get_collate_fn
+from model_forward import model_forward
 from model_loader import load_model
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -61,7 +62,8 @@ def main():
     use_log = ckpt.get("use_log", False)
     target_components = ckpt.get("target_components", ("xx",))
 
-    model, _ = load_model(ckpt, device)
+    model, model_type = load_model(ckpt, device)
+    use_mace = model_type == "MACE"
 
     dataset = LMDBCrystalDataset(
         LMDB_PATH,
@@ -71,7 +73,7 @@ def main():
     )
     xi = np.asarray(dataset.kkr_xi_array, dtype=np.float64)
 
-    print(f"Model : {model_name}  (use_log={use_log})")
+    print(f"Model : {model_name}  (type={model_type}, use_log={use_log})")
     print(f"MPID  : {MPID}")
     idx = find_mpid_index(dataset, MPID, LMDB_PATH)
     if idx is None:
@@ -85,18 +87,16 @@ def main():
 
     loader = DataLoader(
         Subset(dataset, [idx]),
-        batch_size=1, shuffle=False, num_workers=0, collate_fn=collate_pool,
+        batch_size=1,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=get_collate_fn(use_mace=use_mace),
     )
 
-    with torch.no_grad():
-        (af, nf, nfi, cai), target, _ = next(iter(loader))
-        af = af.to(device); nf = nf.to(device)
-        nfi = nfi.to(device); cai = [x.to(device) for x in cai]
-        target = target.to(device)
-
-        out = model(af, nf, nfi, cai)
-        eps_pred = np.exp(out.cpu().numpy()[0, 0]) if use_log else out.cpu().numpy()[0, 0]
-
+    inputs, target, _ = next(iter(loader))
+    target = target.to(device)
+    pred_lin = model_forward(model, model_type, inputs, device, use_log=use_log)
+    eps_pred = pred_lin.cpu().numpy()[0]
     eps_true = target.cpu().numpy()[0, 0]
     mae = float(np.mean(np.abs(eps_pred - eps_true)))
 
