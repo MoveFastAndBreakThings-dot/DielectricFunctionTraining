@@ -113,9 +113,9 @@ def collate_mace_pool(dataset_list):
 def collate_mace_hamaker_pairs(batch):
     """Collate crystal pairs for meta-training with official MACE."""
     require_mace()
-    batch_a = [item[0][0] for item in batch]
-    batch_b = [item[0][1] for item in batch]
-    a_true = torch.tensor([item[1] for item in batch], dtype=torch.float32)
+    batch_a = [item[0] for item in batch]
+    batch_b = [item[1] for item in batch]
+    a_true = torch.tensor([item[2] for item in batch], dtype=torch.float32)
     inputs_a = Batch.from_data_list(batch_a)
     inputs_b = Batch.from_data_list(batch_b)
     return inputs_a, inputs_b, a_true
