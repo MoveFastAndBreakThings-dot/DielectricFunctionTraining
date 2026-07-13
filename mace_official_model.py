@@ -183,7 +183,9 @@ def load_mace_mp0_encoder(foundation_model="medium", device="cpu", dtype=torch.f
         # Older mace-torch: no return_raw_model kwarg
         calc = mace_mp(model=foundation_model, device=device_str, default_dtype=dtype_str)
         encoder = calc.models[0]
-    encoder = encoder.to(device)
+    # return_raw_model=True skips default_dtype casting; MP-0 weights are often fp64
+    # while our AtomicData graphs are fp32 → tensordot dtype mismatch without this.
+    encoder = encoder.to(device=device, dtype=dtype)
     return encoder, mace_encoder_config(encoder, foundation_model=foundation_model)
 
 
