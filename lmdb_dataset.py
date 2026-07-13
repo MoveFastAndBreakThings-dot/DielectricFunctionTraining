@@ -28,6 +28,7 @@ class LMDBCrystalDataset(Dataset):
         use_mace=False,
         mace_r_max=None,
         atom_init_path="atom_init.json",
+        z_table=None,
     ):
         self.lmdb_path = lmdb_path
         self.target_components = target_components
@@ -66,9 +67,14 @@ class LMDBCrystalDataset(Dataset):
         self._txn = self.env.begin()
 
         if use_mace:
-            self.z_table = z_table_from_atom_init(atom_init_path)
+            self.z_table = z_table if z_table is not None else z_table_from_atom_init(atom_init_path)
             self.mace_r_max = float(mace_r_max or self.radius)
             self._check_mace_geometry(0)
+
+    def set_mace_graph_config(self, z_table, mace_r_max):
+        """Override element table / cutoff (e.g. after loading MACE-MP-0)."""
+        self.z_table = z_table
+        self.mace_r_max = float(mace_r_max)
 
     def _check_mace_geometry(self, idx):
         key = f"{idx}".encode("utf-8")

@@ -49,7 +49,7 @@ def node_feature_dim(num_interactions, hidden_irreps, keep_last_layer_irreps=Fal
 
 
 def build_mace_backbone(
-    z_table,
+    z_table=None,
     r_max=8.0,
     num_interactions=2,
     hidden_irreps="128x0e + 128x1o",
@@ -59,10 +59,14 @@ def build_mace_backbone(
     num_radial_basis=8,
     num_cutoff_basis=5,
     dtype=torch.float32,
+    atomic_numbers=None,
 ):
     """Construct a fresh ScaleShiftMACE encoder (energy readout unused)."""
     require_mace()
-    atomic_numbers = list(z_table.zs)
+    if atomic_numbers is None:
+        atomic_numbers = list(z_table.zs)
+    else:
+        atomic_numbers = [int(z) for z in atomic_numbers]
     num_elements = len(atomic_numbers)
     hidden = o3.Irreps(hidden_irreps)
     atomic_energies = np.zeros(num_elements, dtype=np.float64)
@@ -91,6 +95,82 @@ def build_mace_backbone(
         use_last_readout_only=True,
     )
     return model
+
+
+def _as_float(x):
+    if torch.is_tensor(x):
+        return float(x.detach().cpu().reshape(-1)[0].item())
+    return float(x)
+
+
+def mace_encoder_config(encoder):
+    """Pull r_max / Z list / irreps / depth from a loaded ScaleShiftMACE."""
+    if hasattr(encoder, "num_interactions"):
+        num_interactions = int(encoder.num_interactions)
+    else:
+        num_interactions = len(encoder.interactions)
+    return {
+        "r_max": _as_float(encoder.r_max),
+        "atomic_numbers": [int(z) for z in encoder.atomic_numbers],
+        "hidden_irreps": str(encoder.hidden_irreps),
+        "num_interactions": num_interactions,
+    }
+
+
+def load_mace_mp0_encoder(foundation_model="medium", device="cpu", dtype=torch.float32):
+    """
+    Load a pretrained MACE-MP foundation encoder.
+
+    ``foundation_model`` is a mace_mp size name (e.g. ``medium``, ``small``,
+    ``large``), a local ``.model`` path, or a URL. Downloads to the mace cache
+    on first use (server must have network once).
+    """
+    require_mace()
+    from mace.calculators import mace_mp
+
+    dtype_str = "float64" if dtype == torch.float64 else "float32"
+    device_str = str(device)
+    try:
+        encoder = mace_mp(
+            model=foundation_model,
+            device=device_str,
+            default_dtype=dtype_str,
+            return_raw_model=True,
+        )
+    except TypeError:
+        # Older mace-torch: no return_raw_model kwarg
+        calc = mace_mp(model=foundation_model, device=device_str, default_dtype=dtype_str)
+        encoder = calc.models[0]
+    encoder = encoder.to(device)
+    return encoder, mace_encoder_config(encoder)
+
+
+def build_official_frequency_mace_from_foundation(
+    foundation_model="medium",
+    n_frequencies=500,
+    n_output_channels=1,
+    h_fea_len=256,
+    dropout=0.1,
+    device="cpu",
+    dtype=torch.float32,
+):
+    """
+    MACE-MP-0 (or other foundation) encoder + fresh ε(iξ) readout.
+
+    Returns (model, encoder_cfg) where encoder_cfg has r_max / atomic_numbers /
+    hidden_irreps / num_interactions for dataset + checkpoint bookkeeping.
+    """
+    encoder, cfg = load_mace_mp0_encoder(foundation_model, device=device, dtype=dtype)
+    model = OfficialFrequencyMACE(
+        mace_encoder=encoder,
+        n_frequencies=n_frequencies,
+        n_output_channels=n_output_channels,
+        h_fea_len=h_fea_len,
+        dropout=dropout,
+        num_interactions=cfg["num_interactions"],
+        hidden_irreps=cfg["hidden_irreps"],
+    ).to(device)
+    return model, cfg
 
 
 class OfficialFrequencyMACE(nn.Module):

@@ -8,10 +8,16 @@ Backends:
 Usage:
     python preprocess_dataset.py --input_dir data --output_dir processed_data
     python train_mace_frequency.py --model cgcnn
-    python train_mace_frequency.py --model mace   # after: pip install mace-torch
+    python train_mace_frequency.py --model mace
+    # Fine-tune from MACE-MP-0 (downloads once into mace cache on the server):
+    python train_mace_frequency.py --model mace --foundation_model medium \\
+        --model_name mace_mp0_medium_kkr
+    python train_mace_frequency.py --model mace --foundation_model medium \\
+        --freeze_encoder --model_name mace_mp0_medium_head_only
 """
 
 import argparse
+import os
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,7 +27,7 @@ from torch.utils.data import DataLoader, Subset
 from lmdb_dataset import LMDBCrystalDataset, get_collate_fn
 from losses import FrequencyWeightedMSELoss
 from model_forward import model_forward_train
-from model_loader import build_train_model
+from model_loader import build_train_model, set_encoder_trainable
 
 MODEL_NAME = "mace_kkr_v1"
 
@@ -127,6 +133,9 @@ def checkpoint_extra(args, model_type, dataset):
             "mace_max_ell": args.mace_max_ell,
             "mace_correlation": args.mace_correlation,
             "mace_avg_num_neighbors": args.mace_avg_num_neighbors,
+            "foundation_model": getattr(args, "foundation_model", None),
+            "freeze_encoder": getattr(args, "freeze_encoder", False),
+            "mace_atomic_numbers": list(dataset.z_table.zs) if hasattr(dataset, "z_table") else None,
         })
     else:
         base.update({
@@ -161,13 +170,23 @@ def main():
     parser.add_argument("--n_h", type=int, default=1)
     parser.add_argument("--dropout", type=float, default=0.1)
 
-    # Official MACE hyperparameters
+    # Official MACE hyperparameters (ignored when --foundation_model is set;
+    # hypers are taken from the loaded foundation checkpoint instead)
     parser.add_argument("--mace_r_max", type=float, default=None)
     parser.add_argument("--mace_num_interactions", type=int, default=2)
     parser.add_argument("--mace_hidden_irreps", type=str, default="128x0e + 128x1o")
     parser.add_argument("--mace_max_ell", type=int, default=3)
     parser.add_argument("--mace_correlation", type=int, default=3)
     parser.add_argument("--mace_avg_num_neighbors", type=float, default=20.0)
+    parser.add_argument(
+        "--foundation_model", type=str, default=None,
+        help="Init MACE encoder from MACE-MP-0 (e.g. small/medium/large) "
+             "or a local .model path. Requires --model mace.",
+    )
+    parser.add_argument(
+        "--freeze_encoder", action="store_true",
+        help="Freeze MACE encoder; train only pool_to_fc + fc_freq readout.",
+    )
 
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--grad_clip_norm", type=float, default=1.0)
@@ -177,6 +196,9 @@ def main():
 
     use_mace = args.model == "mace"
     target_components = tuple(args.target_components.split(","))
+
+    if args.foundation_model and not use_mace:
+        raise SystemExit("--foundation_model requires --model mace")
 
     print(f"Loading dataset from {args.lmdb_path}...")
     dataset = LMDBCrystalDataset(
@@ -194,6 +216,20 @@ def main():
     print(f"Target components: {target_components}")
     print(f"Output channels: {dataset.get_output_channels()}")
     print(f"Log-space training: {args.use_log}")
+    if args.foundation_model:
+        print(f"Foundation init: {args.foundation_model}")
+        print(f"Freeze encoder: {args.freeze_encoder}")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Build model before loaders so foundation hypers can rewrite dataset z_table / r_max
+    model, model_type, foundation_ckpt = build_train_model(args, dataset, device)
+    set_encoder_trainable(model, freeze_encoder=args.freeze_encoder and use_mace)
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_total = sum(p.numel() for p in model.parameters())
+    print(f"Model type: {model_type}")
+    print(f"Model parameters: {n_total:,} (trainable: {n_trainable:,})")
 
     train_idx, val_idx, test_idx = train_val_test_split(len(dataset))
     print(f"Train: {len(train_idx)}, Val: {len(val_idx)}, Test: {len(test_idx)}")
@@ -206,25 +242,20 @@ def main():
     test_loader = DataLoader(Subset(dataset, test_idx), batch_size=args.batch_size,
                              shuffle=False, num_workers=0, collate_fn=collate_fn)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    model, model_type = build_train_model(args, dataset, device)
-    print(f"Model type: {model_type}")
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-
     criterion = FrequencyWeightedMSELoss(
         dataset.frequency_array,
         n_low_freq=args.n_low_freq,
         metal_low_freq_weight=args.metal_low_freq_weight,
     ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.Adam(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=args.scheduler_factor, patience=args.scheduler_patience,
     )
 
     best_val_loss = float("inf")
     train_losses, val_losses = [], []
+    os.makedirs("models", exist_ok=True)
     model_path = f"models/{args.model_name}.pt"
     n_frequencies = dataset.n_frequencies
     n_output_channels = dataset.get_output_channels()
@@ -264,6 +295,7 @@ def main():
                 "metal_low_freq_weight": args.metal_low_freq_weight,
                 "metal_gap_threshold": args.metal_gap_threshold,
                 **checkpoint_extra(args, model_type, dataset),
+                **foundation_ckpt,
             }, model_path)
             print(f"  -> Saved best model (val_loss: {val_loss:.6f})")
 

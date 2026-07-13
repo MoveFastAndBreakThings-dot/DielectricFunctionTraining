@@ -70,6 +70,8 @@ def main():
         target_components=target_components,
         use_kkr=True,
         metal_gap_threshold=ckpt.get("metal_gap_threshold"),
+        use_mace=use_mace,
+        mace_r_max=ckpt.get("mace_r_max"),
     )
     xi = np.asarray(dataset.kkr_xi_array, dtype=np.float64)
 
