@@ -151,10 +151,12 @@ def build_train_model(args, dataset, device):
                 "mace_r_max": cfg["r_max"],
                 "mace_num_interactions": cfg["num_interactions"],
                 "mace_hidden_irreps": cfg["hidden_irreps"],
+                "mace_node_feat_dim": cfg["node_feat_dim"],
             }
             print(
                 f"Foundation encoder: {foundation} | "
                 f"r_max={cfg['r_max']} | "
+                f"node_feat_dim={cfg['node_feat_dim']} | "
                 f"hidden_irreps={cfg['hidden_irreps']} | "
                 f"num_interactions={cfg['num_interactions']} | "
                 f"n_elements={len(cfg['atomic_numbers'])}"

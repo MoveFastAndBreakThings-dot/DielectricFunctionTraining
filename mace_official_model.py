@@ -103,17 +103,59 @@ def _as_float(x):
     return float(x)
 
 
-def mace_encoder_config(encoder):
-    """Pull r_max / Z list / irreps / depth from a loaded ScaleShiftMACE."""
+# Official MACE-MP-0a size variants (see ACEsuit/mace-foundations mace_mp_0 release).
+# Filenames: ...-128-L0 / L1 / L2 → max_L = 0/1/2, 128 channels, 2 interactions.
+# node_feats concat uses scalars-only on the last layer (MACE default).
+MACE_MP0_ARCH = {
+    "small": {"hidden_irreps": "128x0e", "num_interactions": 2},
+    "medium": {"hidden_irreps": "128x0e + 128x1o", "num_interactions": 2},
+    "large": {"hidden_irreps": "128x0e + 128x1o + 128x2e", "num_interactions": 2},
+}
+
+
+def mace_mp0_arch(foundation_model):
+    """Return hardcoded arch dict for known MP-0 size names, else None."""
+    if foundation_model is None:
+        return None
+    key = str(foundation_model).strip().lower()
+    return MACE_MP0_ARCH.get(key)
+
+
+def mace_encoder_config(encoder, foundation_model=None):
+    """
+    Pull r_max / Z list from the loaded encoder.
+
+    For known ``small``/``medium``/``large`` names, hidden_irreps and
+    node_feat_dim come from ``MACE_MP0_ARCH`` (no forward probe).
+    """
     if hasattr(encoder, "num_interactions"):
         num_interactions = int(encoder.num_interactions)
     else:
         num_interactions = len(encoder.interactions)
+
+    arch = mace_mp0_arch(foundation_model)
+    if arch is not None:
+        hidden_irreps = arch["hidden_irreps"]
+        num_interactions = arch["num_interactions"]
+        node_feat_dim = node_feature_dim(num_interactions, hidden_irreps)
+    else:
+        # Custom path / newer foundation name: derive dim if we can read irreps
+        hidden_irreps = None
+        if hasattr(encoder, "hidden_irreps"):
+            hidden_irreps = str(encoder.hidden_irreps)
+        if hidden_irreps is None:
+            raise ValueError(
+                f"Unknown foundation_model={foundation_model!r}. "
+                f"Use one of {sorted(MACE_MP0_ARCH)} or extend MACE_MP0_ARCH."
+            )
+        node_feat_dim = node_feature_dim(num_interactions, hidden_irreps)
+
     return {
         "r_max": _as_float(encoder.r_max),
         "atomic_numbers": [int(z) for z in encoder.atomic_numbers],
-        "hidden_irreps": str(encoder.hidden_irreps),
+        "hidden_irreps": hidden_irreps,
         "num_interactions": num_interactions,
+        "node_feat_dim": node_feat_dim,
     }
 
 
@@ -142,7 +184,7 @@ def load_mace_mp0_encoder(foundation_model="medium", device="cpu", dtype=torch.f
         calc = mace_mp(model=foundation_model, device=device_str, default_dtype=dtype_str)
         encoder = calc.models[0]
     encoder = encoder.to(device)
-    return encoder, mace_encoder_config(encoder)
+    return encoder, mace_encoder_config(encoder, foundation_model=foundation_model)
 
 
 def build_official_frequency_mace_from_foundation(
@@ -158,7 +200,7 @@ def build_official_frequency_mace_from_foundation(
     MACE-MP-0 (or other foundation) encoder + fresh ε(iξ) readout.
 
     Returns (model, encoder_cfg) where encoder_cfg has r_max / atomic_numbers /
-    hidden_irreps / num_interactions for dataset + checkpoint bookkeeping.
+    node_feat_dim / num_interactions for dataset + checkpoint bookkeeping.
     """
     encoder, cfg = load_mace_mp0_encoder(foundation_model, device=device, dtype=dtype)
     model = OfficialFrequencyMACE(
@@ -169,6 +211,7 @@ def build_official_frequency_mace_from_foundation(
         dropout=dropout,
         num_interactions=cfg["num_interactions"],
         hidden_irreps=cfg["hidden_irreps"],
+        feat_dim=cfg["node_feat_dim"],
     ).to(device)
     return model, cfg
 
@@ -189,6 +232,7 @@ class OfficialFrequencyMACE(nn.Module):
         dropout=0.1,
         num_interactions=2,
         hidden_irreps="128x0e + 128x1o",
+        feat_dim=None,
     ):
         require_mace()
         super().__init__()
@@ -198,8 +242,10 @@ class OfficialFrequencyMACE(nn.Module):
         self.num_interactions = num_interactions
         self.hidden_irreps = hidden_irreps
 
-        feat_dim = node_feature_dim(num_interactions, hidden_irreps)
-        self.pool_to_fc = nn.Linear(feat_dim, h_fea_len)
+        if feat_dim is None:
+            feat_dim = node_feature_dim(num_interactions, hidden_irreps)
+        self.feat_dim = int(feat_dim)
+        self.pool_to_fc = nn.Linear(self.feat_dim, h_fea_len)
         self.pool_activation = nn.SiLU()
         self.fc_freq = nn.Sequential(
             nn.Linear(h_fea_len, h_fea_len * 2),
