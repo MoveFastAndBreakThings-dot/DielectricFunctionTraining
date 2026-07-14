@@ -150,6 +150,13 @@ def main():
         use_mace=use_mace,
         mace_r_max=ckpt.get("mace_r_max"),
     )
+    # Foundation / MP-0 finetunes store their own element table — must match encoder.
+    if use_mace and ckpt.get("mace_atomic_numbers") is not None:
+        from mace.tools import AtomicNumberTable
+        crystal_ds.set_mace_graph_config(
+            AtomicNumberTable(zs=[int(z) for z in ckpt["mace_atomic_numbers"]]),
+            ckpt.get("mace_r_max", crystal_ds.mace_r_max),
+        )
 
     model_name = ckpt.get("model_name", os.path.basename(args.model_path))
     meta_obj = ckpt.get("meta_objective", "epsilon")
