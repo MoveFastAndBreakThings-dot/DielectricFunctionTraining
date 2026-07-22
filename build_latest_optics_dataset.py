@@ -47,8 +47,41 @@ FIGSHARE_PROJECT = {
 }
 
 
-def _fix_url(url):
-    return url.replace("ndownloader.figshare.com", "figshare.com/ndownloader")
+def _file_id_from_url(url):
+    """Extract Figshare file id from common ndownloader URL forms."""
+    # .../files/25253315 or .../files/25253315/something.zip
+    parts = url.rstrip("/").split("/")
+    for i, p in enumerate(parts):
+        if p == "files" and i + 1 < len(parts):
+            return parts[i + 1].split("?")[0]
+    raise ValueError(f"Cannot parse Figshare file id from {url!r}")
+
+
+def figshare_download_url(url):
+    """
+    Use the Figshare API download endpoint.
+
+    figshare.com/ndownloader/... often returns HTTP 202 + empty body to
+    non-browser clients (WAF). api.figshare.com/v2/file/download/{id}
+    redirects to the real object store instead.
+    """
+    file_id = _file_id_from_url(url)
+    return f"https://api.figshare.com/v2/file/download/{file_id}"
+
+
+def download_bytes(url, timeout=120):
+    """GET a zip; require real content starting with ZIP magic."""
+    api_url = figshare_download_url(url)
+    headers = {"User-Agent": "TianTianResearch-optics-builder/1.0"}
+    r = requests.get(api_url, timeout=timeout, headers=headers, allow_redirects=True)
+    r.raise_for_status()
+    data = r.content
+    if len(data) < 4 or data[:2] != b"PK":
+        raise RuntimeError(
+            f"Not a zip (status={r.status_code}, len={len(data)}, "
+            f"ctype={r.headers.get('content-type')}, url={api_url})"
+        )
+    return data
 
 
 def load_raw_catalog():
@@ -75,16 +108,17 @@ def resolve_catalog_key(fls, source):
 def list_figshare_project_entries(project_id):
     entries = []
     page = 1
+    headers = {"User-Agent": "TianTianResearch-optics-builder/1.0"}
     while True:
         url = (
             f"https://api.figshare.com/v2/projects/{project_id}/articles"
             f"?page_size=100&page={page}"
         )
-        arts = requests.get(url, timeout=60).json()
+        arts = requests.get(url, timeout=60, headers=headers).json()
         if not arts:
             break
         for art in arts:
-            detail = requests.get(art["url_public_api"], timeout=60).json()
+            detail = requests.get(art["url_public_api"], timeout=60, headers=headers).json()
             for f in detail.get("files", []):
                 name = f.get("name", "")
                 if not name.endswith(".zip") or not name.startswith("JVASP-"):
@@ -241,10 +275,8 @@ def make_lmdb_record(
 def download_raw(entry, meta, source, timeout=120):
     """Download + parse only (graph/KKR done in the writer thread)."""
     jid = entry["name"].split(".zip")[0]
-    url = _fix_url(entry["download_url"])
-    r = requests.get(url, timeout=timeout)
-    r.raise_for_status()
-    energy, real_d, imag_d, structure = parse_zip(r.content)
+    zip_bytes = download_bytes(entry["download_url"], timeout=timeout)
+    energy, real_d, imag_d, structure = parse_zip(zip_bytes)
 
     info = meta.get(jid, {})
     if structure is None and info.get("atoms"):
