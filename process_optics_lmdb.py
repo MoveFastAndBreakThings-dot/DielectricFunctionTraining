@@ -1,10 +1,11 @@
 """
-Step 2: parse raw JVASP zips → crystal graphs + KKR → LMDB (CPU-heavy, no net).
+Step 2: parse raw optics zips → crystal graphs + KKR → LMDB (CPU-heavy, no net).
+
+Accepts either flat JVASP-*.zip files or Figshare article-level zips that contain
+nested per-material zips / folders (no separate extract step).
 
   python process_optics_lmdb.py --raw_dir raw_opt --out_dir latest_data_opt --workers 32
   python process_optics_lmdb.py --raw_dir raw_mbj --out_dir latest_data_mbj --workers 32
-
-Use with sbatch (see sbatch_process_optics.sh).
 """
 
 import argparse
@@ -18,14 +19,15 @@ from tqdm import tqdm
 
 from jarvis_optics_common import (
     GaussianDistance,
+    discover_material_jobs,
     gap_float,
     load_atom_init,
+    load_job_zip_bytes,
     make_lmdb_record,
-    parse_zip_path,
+    parse_zip_bytes,
     write_lmdb_metadata,
 )
 
-# Set in pool initializer (per process).
 _STATE = {}
 
 
@@ -45,11 +47,11 @@ def _init_worker(atom_init_path, radius, max_num_nbr, n_xi_points, source, meta_
     _STATE["meta"] = meta
 
 
-def _process_one(zip_path):
-    zip_path = Path(zip_path)
-    jid = zip_path.name.split(".zip")[0]
+def _process_one(job):
+    jid = job[1]
     try:
-        energy, real_d, imag_d, structure = parse_zip_path(zip_path)
+        zip_bytes = load_job_zip_bytes(job)
+        energy, real_d, imag_d, structure = parse_zip_bytes(zip_bytes)
         info = _STATE["meta"].get(jid, {})
         opt_gap = gap_float(info.get("opt_gap"))
         mbj_gap = gap_float(info.get("mbj_gap"))
@@ -115,12 +117,24 @@ def run_process(
     lmdb_path = out_dir / "crystal_graphs.lmdb"
     meta_path = raw_dir / "manifest.jsonl"
 
-    zips = sorted(raw_dir.glob("JVASP-*.zip"))
+    print(f"Scanning {raw_dir.resolve()} for materials (flat + article zips)...")
+    jobs = discover_material_jobs(raw_dir)
+    if not jobs:
+        top = list(raw_dir.iterdir())[:20] if raw_dir.is_dir() else []
+        print(f"ERROR: no materials found under {raw_dir.resolve()}")
+        print(f"  top-level: {[p.name for p in top]}")
+        raise SystemExit(1)
+
+    kinds = {}
+    for j in jobs:
+        kinds[j[0]] = kinds.get(j[0], 0) + 1
+    print(f"Found {len(jobs)} materials: {kinds}")
+
     done, start_idx = load_existing_jids(lmdb_path) if resume else (set(), 0)
-    todo = [z for z in zips if z.name.split(".zip")[0] not in done]
+    todo = [j for j in jobs if j[1] not in done]
     if limit is not None:
         todo = todo[:limit]
-    print(f"Raw zips: {len(zips)}, already in LMDB: {len(done)}, to process: {len(todo)}")
+    print(f"Already in LMDB: {len(done)}, to process: {len(todo)}")
     print(f"Workers: {workers} → {lmdb_path}")
 
     atom_init = load_atom_init(atom_init_path)
@@ -141,7 +155,7 @@ def run_process(
         initializer=_init_worker,
         initargs=(atom_init_path, radius, max_num_nbr, n_xi_points, source, str(meta_path)),
     ) as pool:
-        futures = {pool.submit(_process_one, str(z)): z for z in todo}
+        futures = {pool.submit(_process_one, j): j for j in todo}
         for fut in tqdm(as_completed(futures), total=len(futures), desc=f"proc-{source}"):
             jid, record, err = fut.result()
             if err is not None:

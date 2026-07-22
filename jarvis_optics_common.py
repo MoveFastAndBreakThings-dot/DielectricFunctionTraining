@@ -154,16 +154,16 @@ def atoms_to_structure(atoms_dict_or_obj):
     )
 
 
-def parse_zip_path(zip_path):
-    """Parse a on-disk JVASP-*.zip → energy, real_d, imag_d, structure."""
+def parse_zip_bytes(zip_bytes):
+    """Parse a material zip (bytes) → energy, real_d, imag_d, structure."""
     from jarvis.io.vasp.inputs import Poscar
     from jarvis.io.vasp.outputs import Vasprun
 
-    with zipfile.ZipFile(zip_path, "r") as z:
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as z:
         names = z.namelist()
         vrun_name = next((n for n in names if n.endswith("vasprun.xml")), None)
         if vrun_name is None:
-            raise FileNotFoundError(f"No vasprun.xml in {zip_path}; files={names[:10]}")
+            raise FileNotFoundError(f"No vasprun.xml in zip; files={names[:10]}")
 
         with tempfile.NamedTemporaryFile(mode="wb", suffix=".xml", delete=False) as tmp:
             tmp.write(z.read(vrun_name))
@@ -200,6 +200,105 @@ def parse_zip_path(zip_path):
             structure = atoms_to_structure(vrun.all_structures[-1])
 
     return energy, real_d, imag_d, structure
+
+
+def parse_zip_path(zip_path):
+    """Parse a on-disk JVASP-*.zip → energy, real_d, imag_d, structure."""
+    with open(zip_path, "rb") as f:
+        return parse_zip_bytes(f.read())
+
+
+def is_material_zip_name(name):
+    """True for JVASP-12345.zip, false for article-range archives."""
+    base = Path(name).name
+    return (
+        base.startswith("JVASP-")
+        and base.endswith(".zip")
+        and "_to_" not in base.lower()
+        and " to " not in base.lower()
+        and base.count("-") == 1
+    )
+
+
+def discover_material_jobs(raw_dir):
+    """
+    Find per-material optics sources under raw_dir.
+
+    Supports:
+      - flat JVASP-XXXXX.zip on disk
+      - Figshare article zips that contain nested JVASP-XXXXX.zip
+      - article zips that contain JVASP-XXXXX/vasprun.xml folders
+    """
+    raw_dir = Path(raw_dir)
+    jobs = {}  # jid -> job tuple
+
+    # Flat per-material zips
+    for p in raw_dir.rglob("*.zip"):
+        if not p.is_file() or not is_material_zip_name(p.name):
+            continue
+        jid = p.stem
+        jobs[jid] = ("file", jid, str(p))
+
+    # Article-level zips (everything else)
+    for p in sorted(raw_dir.rglob("*.zip")):
+        if not p.is_file() or is_material_zip_name(p.name):
+            continue
+        try:
+            with zipfile.ZipFile(p, "r") as z:
+                names = z.namelist()
+        except zipfile.BadZipFile:
+            print(f"  skip bad zip: {p}")
+            continue
+
+        nested = [n for n in names if is_material_zip_name(n)]
+        if nested:
+            for n in nested:
+                jid = Path(n).stem
+                if jid not in jobs:
+                    jobs[jid] = ("nested_zip", jid, str(p), n)
+            continue
+
+        by_jid = {}
+        for n in names:
+            for part in Path(n).parts:
+                if part.startswith("JVASP-") and "_to_" not in part and " to " not in part:
+                    jid = part
+                    if is_material_zip_name(jid + ".zip") or (
+                        jid.startswith("JVASP-") and jid.count("-") == 1
+                    ):
+                        by_jid.setdefault(jid, []).append(n)
+                    break
+        for jid, members in by_jid.items():
+            if jid in jobs:
+                continue
+            if not any(m.endswith("vasprun.xml") for m in members):
+                continue
+            jobs[jid] = ("nested_dir", jid, str(p), members)
+
+    return [jobs[k] for k in sorted(jobs)]
+
+
+def load_job_zip_bytes(job):
+    """Return zip bytes for a discover_material_jobs entry."""
+    kind = job[0]
+    if kind == "file":
+        with open(job[2], "rb") as f:
+            return f.read()
+    if kind == "nested_zip":
+        _, _, article, member = job
+        with zipfile.ZipFile(article, "r") as z:
+            return z.read(member)
+    if kind == "nested_dir":
+        _, jid, article, members = job
+        buf = io.BytesIO()
+        with zipfile.ZipFile(article, "r") as zin:
+            with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zout:
+                for m in members:
+                    if m.endswith("/"):
+                        continue
+                    zout.writestr(Path(m).name, zin.read(m))
+        return buf.getvalue()
+    raise ValueError(f"Unknown job kind: {kind}")
 
 
 def make_lmdb_record(
