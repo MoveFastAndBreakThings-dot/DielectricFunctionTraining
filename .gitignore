@@ -217,7 +217,15 @@ __marimo__/
 
 # Model checkpoints
 models/
+models_latest_opt/
+models_latest_mbj/
 *.pt
+
+# Datasets (large; build on server)
+latest_data_opt/
+latest_data_mbj/
+processed_data/
+data/
 
 # ignore research papers in repo
 *.pdf

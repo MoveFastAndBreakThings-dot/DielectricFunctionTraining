@@ -14,6 +14,14 @@ Usage:
         --model_name mace_mp0_medium_kkr
     python train_mace_frequency.py --model mace --foundation_model medium \\
         --freeze_encoder --model_name mace_mp0_medium_head_only
+
+    # Latest JARVIS OPT / MBJ LMDBs (from build_latest_optics_dataset.py):
+    python train_mace_frequency.py --model mace --use_log \\
+        --lmdb_path latest_data_opt/crystal_graphs.lmdb \\
+        --models_dir models_latest_opt --model_name mace_kkr_latest_opt
+    python train_mace_frequency.py --model mace --use_log \\
+        --lmdb_path latest_data_mbj/crystal_graphs.lmdb \\
+        --models_dir models_latest_mbj --model_name mace_kkr_latest_mbj
 """
 
 import argparse
@@ -162,6 +170,10 @@ def main():
     parser.add_argument("--metal_low_freq_weight", type=float, default=0.1)
     parser.add_argument("--metal_gap_threshold", type=float, default=0.1)
     parser.add_argument("--model_name", type=str, default=MODEL_NAME)
+    parser.add_argument(
+        "--models_dir", type=str, default="models",
+        help="Directory for checkpoints / loss plots (e.g. models_latest_opt)",
+    )
 
     # CGCNN hyperparameters
     parser.add_argument("--atom_fea_len", type=int, default=128)
@@ -255,8 +267,8 @@ def main():
 
     best_val_loss = float("inf")
     train_losses, val_losses = [], []
-    os.makedirs("models", exist_ok=True)
-    model_path = f"models/{args.model_name}.pt"
+    os.makedirs(args.models_dir, exist_ok=True)
+    model_path = os.path.join(args.models_dir, f"{args.model_name}.pt")
     n_frequencies = dataset.n_frequencies
     n_output_channels = dataset.get_output_channels()
 
@@ -299,7 +311,10 @@ def main():
             }, model_path)
             print(f"  -> Saved best model (val_loss: {val_loss:.6f})")
 
-    plot_losses(train_losses, val_losses, save_path=f"models/{args.model_name}_loss.png")
+    plot_losses(
+        train_losses, val_losses,
+        save_path=os.path.join(args.models_dir, f"{args.model_name}_loss.png"),
+    )
 
     print("\nEvaluating on test set...")
     checkpoint = torch.load(model_path)

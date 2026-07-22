@@ -1,6 +1,10 @@
 lmdb
 pymatgen
 optuna
+requests
+tqdm
+# JARVIS raw optics download / convert (build_latest_optics_dataset.py):
+# jarvis-tools
 # Official E(3)-equivariant MACE (--model mace). Install in your training env only:
 # mace-torch
 # Optional: MACE-MP-0 fine-tuning uses mace.calculators.mace_mp (bundled with mace-torch)
