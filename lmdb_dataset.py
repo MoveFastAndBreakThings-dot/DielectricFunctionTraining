@@ -107,7 +107,10 @@ class LMDBCrystalDataset(Dataset):
 
         is_metal = False
         if self.metal_gap_threshold is not None:
-            is_metal = float(data.get("opt_gap", 1.0)) < self.metal_gap_threshold
+            gap = data.get("opt_gap")
+            if gap is None:
+                gap = 1.0  # missing gap → treat as non-metal
+            is_metal = float(gap) < self.metal_gap_threshold
 
         if self.use_mace:
             graph = structure_arrays_to_atomic_data(
