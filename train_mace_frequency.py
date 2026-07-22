@@ -15,7 +15,7 @@ Usage:
     python train_mace_frequency.py --model mace --foundation_model medium \\
         --freeze_encoder --model_name mace_mp0_medium_head_only
 
-    # Latest JARVIS OPT / MBJ LMDBs (from build_latest_optics_dataset.py):
+    # Latest JARVIS OPT / MBJ LMDBs (download_optics_raw.py + process_optics_lmdb.py):
     python train_mace_frequency.py --model mace --use_log \\
         --lmdb_path latest_data_opt/crystal_graphs.lmdb \\
         --models_dir models_latest_opt --model_name mace_kkr_latest_opt

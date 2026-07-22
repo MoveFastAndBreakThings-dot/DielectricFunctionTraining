@@ -222,10 +222,14 @@ models_latest_mbj/
 *.pt
 
 # Datasets (large; build on server)
+raw_opt/
+raw_mbj/
 latest_data_opt/
 latest_data_mbj/
 processed_data/
 data/
+logs/
+.pydeps/
 
 # ignore research papers in repo
 *.pdf
