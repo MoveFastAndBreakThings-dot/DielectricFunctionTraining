@@ -1,0 +1,28 @@
+#!/bin/bash
+#SBATCH --job-name=cgcnn-opt
+#SBATCH --output=logs/cgcnn_opt_%j.out
+#SBATCH --error=logs/cgcnn_opt_%j.err
+#SBATCH --time=8:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --gres=gpu:1
+# Adjust for Vulcan as needed:
+# #SBATCH --partition=YOUR_PARTITION
+# #SBATCH --account=YOUR_ACCOUNT
+
+set -euo pipefail
+cd "${SLURM_SUBMIT_DIR:-$PWD}"
+mkdir -p logs
+
+# Activate your env if the job doesn't inherit it:
+source ~/ENV/bin/activate
+
+python train_mace_frequency.py \
+  --model cgcnn \
+  --use_log \
+  --lmdb_path latest_data_opt/crystal_graphs.lmdb \
+  --models_dir models_latest_opt \
+  --model_name cgcnn_kkr_latest_opt \
+  --batch_size 32
