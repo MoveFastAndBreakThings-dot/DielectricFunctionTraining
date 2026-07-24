@@ -15,11 +15,12 @@
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 mkdir -p logs
+export PYTHONUNBUFFERED=1
 
 # Activate your env if the job doesn't inherit it:
 source ~/ENV/bin/activate
 
-python train_mace_frequency.py \
+python -u train_mace_frequency.py \
   --model mace \
   --use_log \
   --lmdb_path latest_data_opt/crystal_graphs.lmdb \
