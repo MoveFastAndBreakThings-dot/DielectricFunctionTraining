@@ -20,10 +20,16 @@ export PYTHONUNBUFFERED=1
 # Activate your env if the job doesn't inherit it:
 source ~/ENV/bin/activate
 
+# Scratch MACE with MP-0 *small* architecture (128x0e, L0, 2 layers, r_max=6).
+# No --foundation_model → random weights, not pretrained MP-0.
 python -u train_mace_frequency.py \
   --model mace \
   --use_log \
   --lmdb_path latest_data_opt/crystal_graphs.lmdb \
   --models_dir models_latest_opt \
-  --model_name mace_kkr_latest_opt \
-  --batch_size 32
+  --model_name mace_small_scratch_opt \
+  --batch_size 32 \
+  --mace_hidden_irreps "128x0e" \
+  --mace_num_interactions 2 \
+  --mace_max_ell 0 \
+  --mace_r_max 6.0
