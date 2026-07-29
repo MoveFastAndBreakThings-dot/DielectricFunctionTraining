@@ -220,6 +220,7 @@ models/
 models_latest_opt/
 models_latest_mbj/
 *.pt
+*.torch
 
 # Datasets (large; build on server)
 raw_opt/
@@ -233,3 +234,11 @@ logs/
 
 # ignore research papers in repo
 *.pdf
+
+# TSENN sidecar + weights (clone/extract via setup_tsenn.sh)
+external/TSENN/
+TSENN_models*.tar.gz
+TSENN_models*.tgz
+TSENN_dataset*.tar.gz
+TSENN_dataset*.tgz
+tsenn_opt/
