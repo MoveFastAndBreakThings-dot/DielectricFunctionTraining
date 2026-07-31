@@ -21,6 +21,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+
+import torch_load_compat  # noqa: F401  # before e3nn (PyTorch 2.6+ weights_only)
+
 import torch_geometric as tg
 from e3nn import o3
 from e3nn.io import CartesianTensor

@@ -28,6 +28,9 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+import torch_load_compat  # noqa: F401  # before e3nn (PyTorch 2.6+ weights_only)
+
 import torch_geometric as tg
 import torch_scatter
 from e3nn import o3
