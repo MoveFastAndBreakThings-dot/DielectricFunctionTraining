@@ -2,7 +2,7 @@
 #SBATCH --job-name=tsenn-opt
 #SBATCH --output=logs/tsenn_opt_%j.out
 #SBATCH --error=logs/tsenn_opt_%j.err
-#SBATCH --time=24:00:00
+#SBATCH --time=00:03:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
