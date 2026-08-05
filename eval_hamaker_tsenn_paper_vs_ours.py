@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import pickle
 import sys
 from pathlib import Path
 
+import lmdb
 import numpy as np
 import torch
 from pymatgen.io.ase import AseAtomsAdaptor
@@ -271,6 +273,11 @@ def main():
     parser.add_argument("--device", default=None)
     parser.add_argument("--onehot_dir", default=None)
     parser.add_argument("--atom_init", default="atom_init.json")
+    parser.add_argument(
+        "--lmdb_path",
+        default=None,
+        help="Training LMDB for our model (to recover kkr_xi_array; checkpoints omit it)",
+    )
     parser.add_argument("--out_json", default="tsenn_opt/hamaker_paper_vs_ours.json")
     args = parser.parse_args()
 
@@ -398,14 +405,31 @@ def main():
     our_ckpt = torch.load(args.our_model_path, map_location="cpu", weights_only=False)
     our_model, our_type = load_model(our_ckpt, torch.device(device))
     use_log = bool(our_ckpt.get("use_log", False))
-    xi_ours = np.asarray(
-        our_ckpt.get("kkr_xi_array", our_ckpt.get("xi_array")), dtype=np.float64
-    )
-    if xi_ours is None or len(xi_ours) != our_ckpt["n_frequencies"]:
-        xi_ours = np.logspace(
-            np.log10(0.01), np.log10(args.omega_max), our_ckpt["n_frequencies"]
+    n_freq = int(our_ckpt["n_frequencies"])
+
+    def _as_xi(raw):
+        if raw is None:
+            return None
+        if torch.is_tensor(raw):
+            raw = raw.detach().cpu().numpy()
+        arr = np.asarray(raw, dtype=np.float64).reshape(-1)
+        return arr if arr.size == n_freq else None
+
+    xi_ours = _as_xi(our_ckpt.get("kkr_xi_array", our_ckpt.get("xi_array")))
+    if xi_ours is None and args.lmdb_path:
+        env = lmdb.open(str(args.lmdb_path), readonly=True, lock=False, subdir=False)
+        with env.begin() as txn:
+            meta = pickle.loads(txn.get(b"__metadata__"))
+        env.close()
+        xi_ours = _as_xi(meta.get("kkr_xi_array"))
+        if xi_ours is not None:
+            print(f"Loaded kkr_xi_array from {args.lmdb_path}  (n={len(xi_ours)})")
+    if xi_ours is None:
+        xi_ours = np.logspace(np.log10(0.01), np.log10(100.0), n_freq)
+        print(
+            "WARN: no kkr_xi_array in checkpoint/LMDB; "
+            f"using logspace(0.01, 100, {n_freq}). Pass --lmdb_path for the training LMDB."
         )
-        print("WARN: checkpoint missing kkr_xi_array; using logspace fallback")
 
     atom_init = load_atom_init(args.atom_init)
     radius = float(our_ckpt.get("radius", our_ckpt.get("mace_r_max", 8.0)))
