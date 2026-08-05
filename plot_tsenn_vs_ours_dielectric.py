@@ -5,7 +5,10 @@ Plot dielectric functions on the TSENN paper test set:
 
 Each figure has two panels:
   (a) ε₂(ω)     — GT and TSENN only (our model predicts ε(iξ), not ε₂)
-  (b) ε(iξ)     — GT and TSENN via KKR on [0, ω_max]; ours direct (ξ≤xi_max)
+  (b) ε(iξ)     — GT and TSENN via KKR on [0, ω_max]; ours direct (ξ≤xi_max);
+                  plus ours χ-scaled to match GT static susceptibility:
+                    s = (ε₀_gt − 1) / (ε₀_ours − 1)
+                    ε_scaled = 1 + s · (ε_ours − 1)
 
 Outputs PNGs under tsenn_vs_ours_dielectric/ (or --out_dir).
 
@@ -61,6 +64,7 @@ from preprocess_dataset import GaussianDistance, load_atom_init
 COLOR_GT = "#111111"
 COLOR_TSENN = "#1f77b4"
 COLOR_OURS = "#d62728"
+COLOR_OURS_SCALED = "#ff7f0e"
 COLOR_GAP = "#2ca02c"
 
 # TSENN pickle column names vary slightly across releases / notebooks
@@ -95,6 +99,36 @@ def safe_name(mpid, formula, df_idx):
     return re.sub(r"[^\w\-.]+", "_", raw)[:120]
 
 
+def eps0_from_curve(xi, eps):
+    """ε(iξ→0) via linear interp (or left endpoint)."""
+    xi = np.asarray(xi, dtype=np.float64)
+    eps = np.asarray(eps, dtype=np.float64)
+    order = np.argsort(xi)
+    xi, eps = xi[order], eps[order]
+    if xi[0] <= 0.0:
+        return float(eps[0])
+    # extrapolate / interp toward 0 using lowest two points if needed
+    return float(eps[0])
+
+
+def scale_ours_chi_to_gt(eps_ours, eps0_gt, eps0_ours):
+    """
+    Match static susceptibility, keep shape of (ε−1):
+
+      s = (ε0_gt − 1) / (ε0_ours − 1)
+      ε_scaled = 1 + s · (ε_ours − 1)
+
+    Returns (eps_scaled, s) or (None, None) if scale is ill-defined.
+    """
+    denom = eps0_ours - 1.0
+    if not np.isfinite(eps0_gt) or not np.isfinite(eps0_ours) or abs(denom) < 1e-8:
+        return None, None
+    s = (eps0_gt - 1.0) / denom
+    if not np.isfinite(s) or s <= 0.0:
+        return None, None
+    return 1.0 + s * (np.asarray(eps_ours, dtype=np.float64) - 1.0), float(s)
+
+
 def plot_one(
     out_path,
     omega,
@@ -108,6 +142,8 @@ def plot_one(
     title,
     component,
     bandgap=None,
+    eps_ours_scaled=None,
+    chi_scale=None,
 ):
     fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(8.5, 7.5), constrained_layout=True)
 
@@ -131,7 +167,19 @@ def plot_one(
     ax1.plot(xi_shared, eps_gt, color=COLOR_GT, lw=1.8, label="GT (KKR)")
     ax1.plot(xi_shared, eps_ts, color=COLOR_TSENN, lw=1.6, label="TSENN (KKR)")
     if eps_ours is not None:
-        ax1.plot(xi_ours, eps_ours, color=COLOR_OURS, lw=1.6, label="Ours")
+        ax1.plot(xi_ours, eps_ours, color=COLOR_OURS, lw=1.6, alpha=0.85, label="Ours")
+    if eps_ours_scaled is not None:
+        lab = "Ours χ-scaled"
+        if chi_scale is not None:
+            lab = rf"Ours χ-scaled ($s$={chi_scale:.3f})"
+        ax1.plot(
+            xi_ours,
+            eps_ours_scaled,
+            color=COLOR_OURS_SCALED,
+            lw=1.8,
+            ls="-.",
+            label=lab,
+        )
     ax1.set_xscale("log")
     ax1.set_xlabel(r"$\xi$ (eV)")
     ax1.set_ylabel(rf"$\varepsilon^{{{component}}}(i\xi)$")
@@ -363,8 +411,12 @@ def main():
         eps_o_full = eps_ours_all[local_i]
         if np.all(np.isfinite(eps_o_full)):
             eps_o = eps_o_full[mask_xi]
+            eps0_gt = eps0_from_curve(xi_shared, eps_gt)
+            eps0_ours = eps0_from_curve(xi_ours_plot, eps_o)
+            eps_o_scaled, chi_s = scale_ours_chi_to_gt(eps_o, eps0_gt, eps0_ours)
         else:
             eps_o = None
+            eps_o_scaled, chi_s = None, None
 
         eg = meta["bandgap"]
         eg_str = f"$E_g$={eg:.3f} eV" if eg is not None else "$E_g$=n/a"
@@ -386,6 +438,8 @@ def main():
             title,
             args.component,
             bandgap=eg,
+            eps_ours_scaled=eps_o_scaled,
+            chi_scale=chi_s,
         )
         n_written += 1
 
