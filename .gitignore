@@ -242,3 +242,4 @@ TSENN_models*.tgz
 TSENN_dataset*.tar.gz
 TSENN_dataset*.tgz
 tsenn_opt/
+tsenn_vs_ours_dielectric/
