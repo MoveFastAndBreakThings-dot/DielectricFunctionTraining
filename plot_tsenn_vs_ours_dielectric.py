@@ -61,6 +61,33 @@ from preprocess_dataset import GaussianDistance, load_atom_init
 COLOR_GT = "#111111"
 COLOR_TSENN = "#1f77b4"
 COLOR_OURS = "#d62728"
+COLOR_GAP = "#2ca02c"
+
+# TSENN pickle column names vary slightly across releases / notebooks
+BANDGAP_KEYS = (
+    "band gap",
+    "bandgap",
+    "bandgap_mp",
+    "bandgap_openmx",
+    "band_gap",
+)
+
+
+def row_bandgap(row):
+    """Read bandgap (eV) from a TSENN dataset row; None if missing."""
+    for key in BANDGAP_KEYS:
+        if key not in row.index:
+            continue
+        val = row[key]
+        if val is None:
+            continue
+        try:
+            if isinstance(val, (float, np.floating)) and np.isnan(val):
+                continue
+            return float(val)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def safe_name(mpid, formula, df_idx):
@@ -80,11 +107,20 @@ def plot_one(
     eps_ours,
     title,
     component,
+    bandgap=None,
 ):
     fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(8.5, 7.5), constrained_layout=True)
 
     ax0.plot(omega, eps2_gt, color=COLOR_GT, lw=1.8, label="GT (paper DFT)")
     ax0.plot(omega, eps2_ts, color=COLOR_TSENN, lw=1.6, label="TSENN")
+    if bandgap is not None and float(omega[0]) <= bandgap <= float(omega[-1]):
+        ax0.axvline(
+            bandgap,
+            color=COLOR_GAP,
+            ls="--",
+            lw=1.4,
+            label=rf"$E_g$ = {bandgap:.3f} eV",
+        )
     ax0.set_xlabel(r"$\omega$ (eV)")
     ax0.set_ylabel(rf"$\varepsilon_2^{{{component}}}(\omega)$")
     ax0.set_xlim(float(omega[0]), float(omega[-1]))
@@ -289,7 +325,14 @@ def main():
         atoms = row["symmetrized_structure"]
         mpid = str(row.get("mp_id", row.get("mpid", "")))
         formula = str(row.get("chemical formula", row.get("formula", "")))
-        meta_rows.append({"df_idx": int(idx), "mpid": mpid, "formula": formula})
+        meta_rows.append(
+            {
+                "df_idx": int(idx),
+                "mpid": mpid,
+                "formula": formula,
+                "bandgap": row_bandgap(row),
+            }
+        )
         try:
             structure = ase_to_structure(atoms)
             our_items.append(
@@ -323,8 +366,10 @@ def main():
         else:
             eps_o = None
 
+        eg = meta["bandgap"]
+        eg_str = f"$E_g$={eg:.3f} eV" if eg is not None else "$E_g$=n/a"
         title = (
-            f"{meta['mpid']}  {meta['formula']}  "
+            f"{meta['mpid']}  {meta['formula']}  {eg_str}  "
             f"(df_idx={meta['df_idx']}, {args.component})"
         )
         fname = safe_name(meta["mpid"], meta["formula"], meta["df_idx"]) + ".png"
@@ -340,6 +385,7 @@ def main():
             eps_o,
             title,
             args.component,
+            bandgap=eg,
         )
         n_written += 1
 
