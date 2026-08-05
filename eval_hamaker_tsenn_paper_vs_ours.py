@@ -6,9 +6,11 @@ Protocol (all Hamaker ground truth from the paper dataset only):
   1) Truncate paper DFT ε₂(ω) to [0, ω_max] (default 30 eV)
   2) KKR → ε(iξ) on a shared log ξ grid → self-Hamaker A_gt
   3) TSENN on the same structures → ε₂ → same KKR → A_tsenn
-  4) Our CGCNN/MACE checkpoint on the same structures → ε(iξ) → A_ours
+  4) Our CGCNN/MACE checkpoint on the same structures → ε(iξ)
+     (ξ clipped to ≤ --xi_max, default 30 eV) → A_ours
 
-Does not touch JARVIS OPT LMDBs. Offline once dataset + checkpoints are local.
+Does not touch JARVIS OPT LMDBs for GT. Offline once dataset + checkpoints are local.
+Pass --lmdb_path only to recover our training ξ grid.
 
 Usage:
   python eval_hamaker_tsenn_paper_vs_ours.py --our_model_path models_latest_opt/cgcnn_kkr_latest_opt.pt
@@ -278,6 +280,13 @@ def main():
         default=None,
         help="Training LMDB for our model (to recover kkr_xi_array; checkpoints omit it)",
     )
+    parser.add_argument(
+        "--xi_max",
+        type=float,
+        default=30.0,
+        help="Clip our ε(iξ) grid to ξ≤xi_max before Hamaker (match truncated GT/TSENN). "
+        "Set ≤0 to disable.",
+    )
     parser.add_argument("--out_json", default="tsenn_opt/hamaker_paper_vs_ours.json")
     args = parser.parse_args()
 
@@ -431,6 +440,23 @@ def main():
             f"using logspace(0.01, 100, {n_freq}). Pass --lmdb_path for the training LMDB."
         )
 
+    xi_ours_full = xi_ours
+    if args.xi_max is not None and args.xi_max > 0:
+        mask_xi = xi_ours_full <= float(args.xi_max)
+        if int(mask_xi.sum()) < 4:
+            raise ValueError(
+                f"--xi_max={args.xi_max} leaves <4 ξ points "
+                f"(xi range [{xi_ours_full.min():.4g}, {xi_ours_full.max():.4g}])"
+            )
+        print(
+            f"Clipping our ξ to ≤{args.xi_max} eV for Hamaker: "
+            f"{len(xi_ours_full)} → {int(mask_xi.sum())} points "
+            f"(was max ξ={xi_ours_full.max():.4g} eV)"
+        )
+    else:
+        mask_xi = np.ones(len(xi_ours_full), dtype=bool)
+        print("Our ξ clip disabled (--xi_max≤0); using full training grid for Hamaker")
+
     atom_init = load_atom_init(args.atom_init)
     radius = float(our_ckpt.get("radius", our_ckpt.get("mace_r_max", 8.0)))
     gdf = GaussianDistance(dmin=0, dmax=radius, step=0.2)
@@ -465,7 +491,8 @@ def main():
         except Exception as e:
             print(f"  skip our-model idx={idx} mpid={mpid}: {e}")
 
-    eps_ours_all = np.full((len(idx_test), len(xi_ours)), np.nan, dtype=np.float64)
+    # Store full-length predictions; Hamaker uses ξ≤xi_max slice
+    eps_ours_all = np.full((len(idx_test), len(xi_ours_full)), np.nan, dtype=np.float64)
     for start in tqdm(range(0, len(our_items), args.batch_size), desc="ours-infer"):
         sl = slice(start, start + args.batch_size)
         batch_items = our_items[sl]
@@ -475,6 +502,8 @@ def main():
         )
         for j, loc in enumerate(batch_locals):
             eps_ours_all[loc] = pred[j]
+
+    xi_ours_ham = xi_ours_full[mask_xi]
 
     # ----- KKR + Hamaker -----
     a_gt, a_tsenn, a_ours = [], [], []
@@ -499,13 +528,14 @@ def main():
         a_tsenn.append(at)
         mae_eps_tsenn.append(float(np.mean(np.abs(eps_ts - eps_gt))))
 
-        eps_o = eps_ours_all[local_i]
-        if np.all(np.isfinite(eps_o)):
-            ao = hamaker_constant_zj(xi_ours, eps_o, **hamaker_kw)
+        eps_o_full = eps_ours_all[local_i]
+        if np.all(np.isfinite(eps_o_full)):
+            eps_o = eps_o_full[mask_xi]
+            ao = hamaker_constant_zj(xi_ours_ham, eps_o, **hamaker_kw)
             a_ours.append(ao)
-            # ε MAE on shared ξ via interp of our prediction
+            # ε MAE on shared ξ via interp of clipped prediction
             interp = interp1d(
-                xi_ours,
+                xi_ours_ham,
                 eps_o,
                 kind="linear",
                 bounds_error=False,
@@ -527,7 +557,8 @@ def main():
     print("\n" + "=" * 60)
     print("Hamaker bake-off on TSENN paper test set")
     print(
-        f"  ω_max={args.omega_max}  component={args.component}  "
+        f"  ω_max={args.omega_max}  xi_max_ours={args.xi_max}  "
+        f"component={args.component}  "
         f"n={len(a_gt)}  kkr_fail={n_fail}  ours_ok={int(ours_mask.sum())}"
     )
     print("=" * 60)
@@ -556,6 +587,8 @@ def main():
         "omega_max": args.omega_max,
         "n_omega": args.n_omega,
         "n_xi": args.n_xi,
+        "xi_max_ours": args.xi_max,
+        "n_xi_ours_hamaker": int(mask_xi.sum()),
         "component": args.component,
         "n_test": len(idx_test),
         "n_hamaker": len(a_gt),
