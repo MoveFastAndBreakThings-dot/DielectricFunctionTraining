@@ -253,10 +253,17 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    torch.set_default_dtype(DEFAULT_DTYPE)
+    # CGCNN/MACE + LMDB are float32; only switch to float64 for TSENN below.
+    torch.set_default_dtype(torch.float32)
 
     print(f"device={device}")
-    model_t, ckpt_t = load_tsenn_kkr(args.tsenn, device)
+    ckpt_t_meta = torch.load(args.tsenn, map_location="cpu")
+    if ckpt_t_meta.get("model_type") != "TSENN" or ckpt_t_meta.get("target") != "kkr_eps_xx":
+        raise ValueError(
+            f"{args.tsenn} does not look like a train_tsenn_kkr.py checkpoint "
+            f"(model_type={ckpt_t_meta.get('model_type')}, target={ckpt_t_meta.get('target')})"
+        )
+
     ckpt_o = torch.load(args.ours, map_location=device)
     model_o, model_type_o = load_model(ckpt_o, device)
     use_log_o = bool(ckpt_o.get("use_log", False))
@@ -272,18 +279,18 @@ def main():
         mace_r_max=ckpt_o.get("mace_r_max"),
     )
     xi = np.asarray(dataset.kkr_xi_array, dtype=np.float64)
-    if int(ckpt_t["n_frequencies"]) != len(xi):
+    if int(ckpt_t_meta["n_frequencies"]) != len(xi):
         raise ValueError(
-            f"TSENN n_frequencies={ckpt_t['n_frequencies']} != LMDB ξ length={len(xi)}"
+            f"TSENN n_frequencies={ckpt_t_meta['n_frequencies']} != LMDB ξ length={len(xi)}"
         )
 
     if args.split_from == "ours":
         split_idx = list(get_split_indices(ckpt_o, len(dataset), args.split))
     else:
         # TSENN stores indices into its filtered jid list — map jids → LMDB indices
-        jids = ckpt_t.get("jids")
+        jids = ckpt_t_meta.get("jids")
         key = {"train": "idx_train", "val": "idx_valid", "test": "idx_test"}[args.split]
-        local_idx = ckpt_t.get(key)
+        local_idx = ckpt_t_meta.get(key)
         if not jids or local_idx is None:
             raise ValueError("TSENN checkpoint missing jids / split indices")
         jid_to_lmdb = {}
@@ -307,8 +314,10 @@ def main():
 
     print("=" * 64)
     print(f"TSENN : {args.tsenn}")
-    print(f"  use_log={ckpt_t.get('use_log')}  scale={ckpt_t.get('scale')}  "
-          f"layers={ckpt_t.get('layers')}")
+    print(
+        f"  use_log={ckpt_t_meta.get('use_log')}  scale={ckpt_t_meta.get('scale')}  "
+        f"layers={ckpt_t_meta.get('layers')}"
+    )
     print(f"Ours  : {args.ours}  [{model_type_o}]  use_log={use_log_o}")
     print(f"Split : {args.split} from {args.split_from}  n={len(split_idx)}")
     print(f"LMDB  : {args.lmdb_path}  F={len(xi)}")
@@ -322,9 +331,14 @@ def main():
         collate_fn=get_collate_fn(use_mace=use_mace),
     )
     pred_o, true = predict_ours(model_o, model_type_o, loader, device, use_log_o)
+    del model_o
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
     records = read_lmdb_records(args.lmdb_path, split_idx)
     onehot_dir = args.onehot_dir or str(TSENN_ROOT / "onehot_data")
+    torch.set_default_dtype(DEFAULT_DTYPE)
+    model_t, ckpt_t = load_tsenn_kkr(args.tsenn, device)
     pred_t = predict_tsenn(
         model_t,
         ckpt_t,
@@ -334,6 +348,7 @@ def main():
         onehot_dir,
         refine=not args.no_refine,
     )
+    torch.set_default_dtype(torch.float32)
 
     infos = [dataset.get_sample_info(i) for i in split_idx]
     dataset.close()
