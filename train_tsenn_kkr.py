@@ -194,6 +194,7 @@ def load_lmdb_rows(lmdb_path, xi_dst, refine, limit, gap_threshold, gap_table):
                 continue
             rows.append(
                 {
+                    "lmdb_idx": i,
                     "jid": rec["jid"],
                     "mpid": rec.get("mpid") or "",
                     "formula": rec.get("formula") or "",
@@ -239,6 +240,12 @@ def main():
     parser.add_argument("--gap_table", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument(
+        "--align_split_ckpt",
+        default=None,
+        help="FrequencyCGCNN/MACE .pt whose train/val/test_idx (LMDB indices) to reuse. "
+        "Required for a shared held-out set with that model.",
+    )
     args = parser.parse_args()
 
     _ensure_tsenn_path()
@@ -312,6 +319,34 @@ def main():
         )
 
     idx_train, idx_valid, idx_test = train_val_test_split(len(graphs), seed=args.seed)
+    if args.align_split_ckpt:
+        align = torch.load(args.align_split_ckpt, map_location="cpu")
+        train_set = set(align.get("train_idx") or [])
+        val_set = set(align.get("val_idx") or [])
+        test_set = set(align.get("test_idx") or [])
+        if not train_set or not val_set or not test_set:
+            raise ValueError(
+                f"{args.align_split_ckpt} missing train_idx/val_idx/test_idx"
+            )
+        idx_train, idx_valid, idx_test = [], [], []
+        unmatched = 0
+        for row_i, r in enumerate(rows):
+            li = r["lmdb_idx"]
+            if li in train_set:
+                idx_train.append(row_i)
+            elif li in val_set:
+                idx_valid.append(row_i)
+            elif li in test_set:
+                idx_test.append(row_i)
+            else:
+                unmatched += 1
+        print(
+            f"Aligned splits from {args.align_split_ckpt}: "
+            f"train/val/test={len(idx_train)}/{len(idx_valid)}/{len(idx_test)} "
+            f"(unmatched rows={unmatched})"
+        )
+        if min(len(idx_train), len(idx_valid), len(idx_test)) == 0:
+            raise RuntimeError("Aligned split produced an empty partition")
     print(f"split train/val/test: {len(idx_train)}/{len(idx_valid)}/{len(idx_test)}")
 
     loader_train = tg.loader.DataLoader(
@@ -418,6 +453,8 @@ def main():
             "idx_valid": idx_valid,
             "idx_test": idx_test,
             "jids": [r["jid"] for r in rows],
+            "lmdb_indices": [r["lmdb_idx"] for r in rows],
+            "align_split_ckpt": args.align_split_ckpt,
             "lmdb_path": args.lmdb_path,
         }
         torch.save(payload, latest_path)

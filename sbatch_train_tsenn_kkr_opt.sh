@@ -21,10 +21,12 @@ export PYTHONUNBUFFERED=1
 source ~/ENV/bin/activate
 
 # Fresh TSENN weights → ε_xx(iξ) on LMDB KKR grid (~500 pts), paper arch hypers.
+# Align train/val/test to the CGCNN checkpoint so compare uses one shared test set.
 python -u train_tsenn_kkr.py \
   --lmdb_path latest_data_opt/crystal_graphs.lmdb \
   --models_dir models_latest_opt \
   --model_name tsenn_kkr_xx_latest_opt \
+  --align_split_ckpt models_latest_opt/cgcnn_kkr_latest_opt.pt \
   --use_log \
   --batch_size 8 \
   --epochs 100 \

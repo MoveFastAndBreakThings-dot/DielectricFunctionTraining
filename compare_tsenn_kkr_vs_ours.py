@@ -15,6 +15,8 @@ Usage:
       --ours  models_latest_opt/cgcnn_kkr_latest_opt.pt \\
       --lmdb_path latest_data_opt/crystal_graphs.lmdb
 
+  # Default --split_mode intersection = jids held out by *both* checkpoints.
+  # Retrain TSENN with --align_split_ckpt <ours.pt> for a true shared split.
   python compare_tsenn_kkr_vs_ours.py --tsenn ... --ours ... --split test --limit 64
 """
 
@@ -62,6 +64,72 @@ from train_tsenn_kkr import (
 )
 
 OUT_DIR = "tsenn_kkr_vs_ours"
+
+TSENN_SPLIT_KEY = {"train": "idx_train", "val": "idx_valid", "test": "idx_test"}
+OURS_SPLIT_KEY = {"train": "train_idx", "val": "val_idx", "test": "test_idx"}
+
+
+def build_jid_to_lmdb(dataset):
+    mapping = {}
+    for i in range(len(dataset)):
+        mapping[dataset.get_sample_info(i)["jid"]] = i
+    return mapping
+
+
+def ours_split_lmdb_indices(ckpt_o, n_dataset, split):
+    return list(get_split_indices(ckpt_o, n_dataset, split))
+
+
+def tsenn_split_lmdb_indices(ckpt_t, jid_to_lmdb, split):
+    jids = ckpt_t.get("jids")
+    local_idx = ckpt_t.get(TSENN_SPLIT_KEY[split])
+    if not jids or local_idx is None:
+        raise ValueError("TSENN checkpoint missing jids / split indices")
+    out = []
+    missing = 0
+    for li in local_idx:
+        jid = jids[li]
+        if jid not in jid_to_lmdb:
+            missing += 1
+            continue
+        out.append(jid_to_lmdb[jid])
+    if missing:
+        print(f"warning: {missing} TSENN {split} jids not in LMDB")
+    return out
+
+
+def resolve_eval_indices(ckpt_o, ckpt_t, dataset, split, split_mode):
+    """
+    Return LMDB indices for evaluation.
+
+    intersection (default): jids in both models' held-out split — fair shared test.
+    ours / tsenn: that checkpoint's split only (can leak for the other model).
+    """
+    jid_to_lmdb = build_jid_to_lmdb(dataset)
+    ours_idx = ours_split_lmdb_indices(ckpt_o, len(dataset), split)
+    tsenn_idx = tsenn_split_lmdb_indices(ckpt_t, jid_to_lmdb, split)
+
+    if split_mode == "ours":
+        split_idx = ours_idx
+    elif split_mode == "tsenn":
+        split_idx = tsenn_idx
+    else:
+        ours_jids = {dataset.get_sample_info(i)["jid"] for i in ours_idx}
+        tsenn_jids = {dataset.get_sample_info(i)["jid"] for i in tsenn_idx}
+        common = ours_jids & tsenn_jids
+        split_idx = sorted(jid_to_lmdb[j] for j in common)
+        print(
+            f"Shared {split} set (jid intersection): "
+            f"ours={len(ours_idx)}  tsenn={len(tsenn_idx)}  "
+            f"intersection={len(split_idx)}"
+        )
+        if not split_idx:
+            raise RuntimeError(
+                f"Empty jid intersection for split={split}. "
+                "Retrain TSENN with --align_split_ckpt pointing at the ours checkpoint."
+            )
+    return split_idx, ours_idx, tsenn_idx
+
 
 
 def summarize_eps(name, pred, true):
@@ -233,10 +301,11 @@ def main():
     parser.add_argument("--lmdb_path", default="latest_data_opt/crystal_graphs.lmdb")
     parser.add_argument("--split", default="test", choices=("train", "val", "test"))
     parser.add_argument(
-        "--split_from",
-        default="ours",
-        choices=("ours", "tsenn"),
-        help="Which checkpoint supplies train/val/test indices (default: ours)",
+        "--split_mode",
+        default="intersection",
+        choices=("intersection", "ours", "tsenn"),
+        help="intersection=jids in both models' held-out split (fair default). "
+        "ours/tsenn=use only that checkpoint's split (may leak for the other).",
     )
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--n_matsubara", type=int, default=500)
@@ -284,30 +353,9 @@ def main():
             f"TSENN n_frequencies={ckpt_t_meta['n_frequencies']} != LMDB ξ length={len(xi)}"
         )
 
-    if args.split_from == "ours":
-        split_idx = list(get_split_indices(ckpt_o, len(dataset), args.split))
-    else:
-        # TSENN stores indices into its filtered jid list — map jids → LMDB indices
-        jids = ckpt_t_meta.get("jids")
-        key = {"train": "idx_train", "val": "idx_valid", "test": "idx_test"}[args.split]
-        local_idx = ckpt_t_meta.get(key)
-        if not jids or local_idx is None:
-            raise ValueError("TSENN checkpoint missing jids / split indices")
-        jid_to_lmdb = {}
-        for i in range(len(dataset)):
-            jid_to_lmdb[dataset.get_sample_info(i)["jid"]] = i
-        split_idx = []
-        missing = 0
-        for li in local_idx:
-            jid = jids[li]
-            if jid not in jid_to_lmdb:
-                missing += 1
-                continue
-            split_idx.append(jid_to_lmdb[jid])
-        if missing:
-            print(f"warning: {missing} TSENN split jids not in LMDB")
-        if not split_idx:
-            raise RuntimeError("No overlapping jids for TSENN split")
+    split_idx, ours_idx, tsenn_idx = resolve_eval_indices(
+        ckpt_o, ckpt_t_meta, dataset, args.split, args.split_mode
+    )
 
     if args.limit is not None:
         split_idx = split_idx[: args.limit]
@@ -319,7 +367,11 @@ def main():
         f"layers={ckpt_t_meta.get('layers')}"
     )
     print(f"Ours  : {args.ours}  [{model_type_o}]  use_log={use_log_o}")
-    print(f"Split : {args.split} from {args.split_from}  n={len(split_idx)}")
+    print(
+        f"Split : {args.split}  mode={args.split_mode}  "
+        f"eval_n={len(split_idx)}  (ours_{args.split}={len(ours_idx)}, "
+        f"tsenn_{args.split}={len(tsenn_idx)})"
+    )
     print(f"LMDB  : {args.lmdb_path}  F={len(xi)}")
     print("=" * 64)
 
@@ -452,8 +504,10 @@ def main():
         "ours": args.ours,
         "lmdb_path": args.lmdb_path,
         "split": args.split,
-        "split_from": args.split_from,
+        "split_mode": args.split_mode,
         "n": len(split_idx),
+        "n_ours_split": len(ours_idx),
+        "n_tsenn_split": len(tsenn_idx),
         "n_frequencies": len(xi),
         "eps_tsenn": stats_eps_t,
         "eps_ours": stats_eps_o,
