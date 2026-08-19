@@ -8,11 +8,9 @@ TSENN-KKR equivalent of eval_hamaker_pair_percentiles.py:
 Usage:
   python eval_tsenn_hamaker_pair_percentiles.py \\
       --model_path models_latest_opt/tsenn_kkr_xx_latest_opt_best.torch \\
+      --ours models_latest_opt/cgcnn_kkr_latest_opt.pt \\
       --pairs_dir meta_hamaker_pairs_opt \\
       --lmdb_path latest_data_opt/crystal_graphs.lmdb
-
-  python eval_tsenn_hamaker_pair_percentiles.py --model_path ... --skip_core
-  python eval_tsenn_hamaker_pair_percentiles.py --model_path ... --skip_pairs --limit 64
 """
 
 from __future__ import annotations
@@ -46,33 +44,32 @@ from train_tsenn_kkr import DEFAULT_DTYPE, TSENN_ROOT
 K_B_EV = 8.617333e-5
 
 
-def core_lmdb_indices(ckpt, crystal_ds, split):
-    """Map TSENN row-split → LMDB indices."""
+def core_lmdb_indices(ckpt, crystal_ds, split, ours_ckpt=None):
+    """
+    LMDB indices for the core eval split.
+
+    If --ours is given (or splits are aligned), use that checkpoint's test_idx.
+    Else use TSENN's lmdb_indices for its row-split (no full-LMDB jid scan).
+    """
+    if ours_ckpt is not None:
+        from compare_hamaker_constants import get_split_indices
+
+        idx = list(get_split_indices(ours_ckpt, len(crystal_ds), split))
+        print(f"Core split from --ours ({split}): n={len(idx)}")
+        return idx
+
     local = ckpt.get(TSENN_SPLIT_KEY[split])
     if local is None:
         raise ValueError(f"TSENN checkpoint missing {TSENN_SPLIT_KEY[split]}")
     lmdb_indices = ckpt.get("lmdb_indices")
-    if lmdb_indices is not None:
-        return [int(lmdb_indices[i]) for i in local]
-
-    jids = ckpt.get("jids")
-    if not jids:
-        raise ValueError("TSENN checkpoint missing jids / lmdb_indices")
-    jid_to_lmdb = {}
-    for i in range(len(crystal_ds)):
-        jid_to_lmdb[crystal_ds.get_sample_info(i)["jid"]] = i
-    out = []
-    missing = 0
-    for li in local:
-        jid = jids[li]
-        if jid not in jid_to_lmdb:
-            missing += 1
-            continue
-        out.append(jid_to_lmdb[jid])
-    if missing:
-        print(f"warning: {missing} TSENN {split} jids not in LMDB")
-    if not out:
-        raise RuntimeError(f"No LMDB indices resolved for TSENN {split} split")
+    if lmdb_indices is None:
+        raise ValueError(
+            "TSENN checkpoint has no lmdb_indices. Pass --ours <cgcnn.pt> "
+            "to use that model's test set (assumes aligned splits), or retrain "
+            "with --align_split_ckpt."
+        )
+    out = [int(lmdb_indices[i]) for i in local]
+    print(f"Core split from TSENN lmdb_indices ({split}): n={len(out)}")
     return out
 
 
@@ -81,7 +78,7 @@ def load_gt_eps_xx(crystal_ds, indices):
     out = []
     for i in indices:
         _, target, _ = crystal_ds[i]
-        out.append(target[0].numpy())
+        out.append(np.asarray(target[0], dtype=np.float64))
     return np.stack(out, axis=0)
 
 
@@ -115,6 +112,13 @@ def main():
         help="TSENN crystal split for core ε(iξ) loss",
     )
     parser.add_argument("--lmdb_path", type=str, default=None)
+    parser.add_argument(
+        "--ours",
+        type=str,
+        default=None,
+        help="CGCNN/MACE .pt whose test_idx to use for core split "
+        "(assumes same test set as TSENN). Defaults to align_split_ckpt in the TSENN ckpt if present.",
+    )
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--n_matsubara", type=int, default=None)
     parser.add_argument("--skip_core", action="store_true")
@@ -165,8 +169,18 @@ def main():
 
     needed = set()
 
+    ours_ckpt = None
+    ours_path = args.ours or ckpt.get("align_split_ckpt")
+    if ours_path:
+        ours_path = str(ours_path)
+        if Path(ours_path).is_file():
+            ours_ckpt = torch.load(ours_path, map_location="cpu")
+            print(f"Using aligned test set from {ours_path}")
+        elif args.ours:
+            raise FileNotFoundError(f"--ours not found: {ours_path}")
+
     if not args.skip_core:
-        core_idx = core_lmdb_indices(ckpt, crystal_ds, args.core_split)
+        core_idx = core_lmdb_indices(ckpt, crystal_ds, args.core_split, ours_ckpt=ours_ckpt)
         if args.limit is not None:
             core_idx = core_idx[: args.limit]
         needed.update(core_idx)
