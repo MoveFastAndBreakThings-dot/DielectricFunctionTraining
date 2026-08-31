@@ -230,11 +230,6 @@ def hamaker_zj_from_delta(d_a, d_b, temperature_k=T_K):
     return a
 
 
-def mismatch_fraction(eps_a, eps_m, eps_b):
-    prod = (eps_a - eps_m) * (eps_b - eps_m)
-    return np.mean(prod < 0, axis=-1)
-
-
 def retardation_r(z_nm, xi_ev, eps_m):
     return 2.0 * z_nm * xi_ev * np.sqrt(np.maximum(eps_m, 1e-12)) / HBARC_EV_NM
 
@@ -271,7 +266,7 @@ def eval_triple(eps_a, eps_m, eps_b, xi, z_grid, temperature_k=T_K):
     d_a = deltas(eps_a, eps_m)
     d_b = deltas(eps_b, eps_m)
     a_nr = float(hamaker_zj_from_delta(d_a, d_b, temperature_k))
-    frac = float(mismatch_fraction(eps_a[None, :], eps_m, eps_b[None, :]))
+    frac = float(np.mean((eps_a - eps_m) * (eps_b - eps_m) < 0))
     a_z = []
     for z in z_grid:
         r_n = retardation_r(z, xi, eps_m)
@@ -416,7 +411,7 @@ def main():
         help="crystal_graphs.lmdb (required with --model_path; else GT-only crystals)",
     )
     parser.add_argument("--limit", type=int, default=None, help="Cap number of crystals")
-    parser.add_argument("--split", default="test", choices=("train", "val", "test", "all"))
+    parser.add_argument("--split", default="all", choices=("train", "val", "test", "all"))
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--device", default=None)
     parser.add_argument(
