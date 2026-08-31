@@ -30,6 +30,9 @@ Usage:
   python find_repulsive_lifshitz.py --model_path ... --lmdb_path ... \\
       --media bromobenzene,diiodomethane,benzene --bodies crystals,gold --compare_gt
   python find_repulsive_lifshitz.py --media vacuum --bodies gold,silica,PTFE
+
+All A_nr<0 pairs are written to --out_pairs (npz) and per-material density /
+ε(0) to --out_materials (csv). The printed table is only --top_k.
 """
 
 from __future__ import annotations
@@ -151,6 +154,23 @@ def builtin_eps_fn(name):
 BUILTIN_NAMES = ("vacuum", "gold") + tuple(_OSC.keys())
 DEFAULT_MEDIA = "bromobenzene,diiodomethane"
 _ELEMENT_RE = re.compile(r"[A-Z][a-z]?")
+U_TO_G_CM3 = 1.66053906660  # u/Å³ → g/cm³
+# Standard atomic weights (u), Z = 1..94. Only used for a density column.
+_ATOMIC_MASS_U = np.array(
+    [
+        1.008, 4.003, 6.94, 9.012, 10.81, 12.011, 14.007, 15.999, 18.998, 20.18,
+        22.99, 24.305, 26.982, 28.085, 30.974, 32.06, 35.45, 39.948, 39.098, 40.078,
+        44.956, 47.867, 50.942, 51.996, 54.938, 55.845, 58.933, 58.693, 63.546, 65.38,
+        69.723, 72.63, 74.922, 78.971, 79.904, 83.798, 85.468, 87.62, 88.906, 91.224,
+        92.906, 95.95, 97.91, 101.07, 102.91, 106.42, 107.87, 112.41, 114.82, 118.71,
+        121.76, 127.60, 126.90, 131.29, 132.91, 137.33, 138.91, 140.12, 140.91, 144.24,
+        145.0, 150.36, 151.96, 157.25, 158.93, 162.50, 164.93, 167.26, 168.93, 173.05,
+        174.97, 178.49, 180.95, 183.84, 186.21, 190.23, 192.22, 195.08, 196.97, 200.59,
+        204.38, 207.2, 208.98, 209.0, 210.0, 222.0, 223.0, 226.0, 227.0, 232.04,
+        231.04, 238.03, 237.0, 244.0,
+    ],
+    dtype=np.float64,
+)
 
 
 def formula_n_elements(formula):
@@ -163,6 +183,61 @@ def keep_crystal(formula, n_atoms, min_atoms, drop_elemental):
     if drop_elemental and formula_n_elements(formula) < 2:
         return False
     return True
+
+
+def _mass_u(atomic_numbers):
+    z = np.asarray(atomic_numbers, dtype=int)
+    z = z[(z >= 1) & (z <= len(_ATOMIC_MASS_U))]
+    if z.size == 0:
+        return float("nan")
+    return float(_ATOMIC_MASS_U[z - 1].sum())
+
+
+def record_meta(data, idx):
+    formula = data.get("formula") or ""
+    n_atoms = data.get("n_atoms")
+    if n_atoms is None:
+        n_atoms = len(data.get("atomic_numbers") or data.get("atom_fea") or [])
+    n_atoms = int(n_atoms)
+    cell = data.get("cell")
+    if cell is None:
+        volume = float("nan")
+    else:
+        volume = float(abs(np.linalg.det(np.asarray(cell, dtype=np.float64).reshape(3, 3))))
+    dens_n = n_atoms / volume if volume > 0 else float("nan")
+    zs = data.get("atomic_numbers")
+    dens_g = float("nan")
+    if zs is not None and volume > 0:
+        dens_g = _mass_u(zs) * U_TO_G_CM3 / volume
+    gap = data.get("opt_gap")
+    mbj = data.get("mbj_gap")
+    return {
+        "jid": data.get("jid") or f"idx{idx}",
+        "mpid": data.get("mpid") or "",
+        "formula": formula,
+        "n_atoms": n_atoms,
+        "n_elements": formula_n_elements(formula),
+        "volume_A3": volume,
+        "density_n_per_A3": dens_n,
+        "density_g_cm3": dens_g,
+        "opt_gap": float(gap) if gap is not None else float("nan"),
+        "mbj_gap": float(mbj) if mbj is not None else float("nan"),
+    }
+
+
+def builtin_meta(name):
+    return {
+        "jid": name,
+        "mpid": "",
+        "formula": name,
+        "n_atoms": float("nan"),
+        "n_elements": float("nan"),
+        "volume_A3": float("nan"),
+        "density_n_per_A3": float("nan"),
+        "density_g_cm3": float("nan"),
+        "opt_gap": float("nan"),
+        "mbj_gap": float("nan"),
+    }
 
 
 def matsubara_xi(n_max, temperature_k=T_K):
@@ -182,7 +257,7 @@ def interpolate_eps(xi_src, eps_src, xi_query):
 
 def load_lmdb_eps(lmdb_path, xi_query, limit=None, min_atoms=2, drop_elemental=True):
     env = lmdb.open(str(lmdb_path), readonly=True, lock=False, subdir=False)
-    names, stack = [], []
+    names, stack, metas = [], [], []
     n_skip = 0
     with env.begin() as txn:
         meta = pickle.loads(txn.get(b"__metadata__"))
@@ -203,32 +278,33 @@ def load_lmdb_eps(lmdb_path, xi_query, limit=None, min_atoms=2, drop_elemental=T
             jid = rec.get("jid") or f"idx{i}"
             names.append(f"{jid}:{formula}".strip(":"))
             stack.append(eps)
+            metas.append(record_meta(rec, i))
             if limit is not None and len(stack) >= int(limit):
                 break
     env.close()
     if n_skip:
         print(f"  dropped {n_skip} 1-atom/elemental cells")
     if not stack:
-        return names, np.zeros((0, len(xi_query)))
-    return names, np.stack(stack, axis=0)
+        return names, np.zeros((0, len(xi_query))), metas
+    return names, np.stack(stack, axis=0), metas
 
 
 def filter_crystal_indices(dataset, indices, min_atoms, drop_elemental):
-    kept = []
+    kept, metas = [], []
     n_skip_atoms = 0
     n_skip_elem = 0
     for i in indices:
-        info = dataset.get_sample_info(i)
-        n_atoms = int(info.get("n_atoms") or 0)
-        formula = info.get("formula") or ""
-        if n_atoms < min_atoms:
+        data = pickle.loads(dataset._txn.get(f"{i}".encode("utf-8")))
+        meta = record_meta(data, i)
+        if meta["n_atoms"] < min_atoms:
             n_skip_atoms += 1
             continue
-        if drop_elemental and formula_n_elements(formula) < 2:
+        if drop_elemental and meta["n_elements"] < 2:
             n_skip_elem += 1
             continue
         kept.append(i)
-    return kept, n_skip_atoms, n_skip_elem
+        metas.append(meta)
+    return kept, metas, n_skip_atoms, n_skip_elem
 
 
 def crystal_label(dataset, idx):
@@ -326,39 +402,75 @@ def eval_triple(eps_a, eps_m, eps_b, xi, z_grid, temperature_k=T_K):
     }
 
 
+def hamaker_matrix(eps_bodies, eps_m, temperature_k):
+    d_all = deltas(eps_bodies, eps_m)
+    pref = 1.5 * K_B_J * temperature_k * ZJ_PER_J
+    w = np.ones(d_all.shape[1])
+    w[0] = 0.5
+    dw = d_all * np.sqrt(w)
+    return pref * (dw @ dw.T)
+
+
 def search_pairs(names, eps, media_idx, body_idx, xi, z_grid, temperature_k, top_k, gt_eps=None):
-    candidates = []
+    body_idx = np.asarray(body_idx, dtype=np.int32)
+    chunks_ia, chunks_ib, chunks_im, chunks_a = [], [], [], []
+    chunks_gt = []
     vacuum_n_rep = 0
     n_checked = 0
     for im in media_idx:
-        eps_m = eps[im]
-        d_all = deltas(eps[body_idx], eps_m)
-        pref = 1.5 * K_B_J * temperature_k * ZJ_PER_J
-        w = np.ones(d_all.shape[1])
-        w[0] = 0.5
-        dw = d_all * np.sqrt(w)
-        a_mat = pref * (dw @ dw.T)
+        a_mat = hamaker_matrix(eps[body_idx], eps[im], temperature_k)
         n_checked += int(a_mat.size)
         ia, ib = np.where(np.triu(a_mat < 0.0, k=1))
         if names[im] == "vacuum":
             vacuum_n_rep += int(len(ia))
-        for i, j in zip(ia.tolist(), ib.tolist()):
-            ja, jb = int(body_idx[i]), int(body_idx[j])
-            if ja == im or jb == im:
-                continue
-            candidates.append((float(a_mat[i, j]), ja, jb, im))
-    candidates.sort(key=lambda t: t[0])
-    hits = []
-    for _, ja, jb, im in candidates[:top_k]:
-        stats = eval_triple(eps[ja], eps[im], eps[jb], xi, z_grid, temperature_k)
-        row = {"A": names[ja], "medium": names[im], "B": names[jb], **stats}
+        ja = body_idx[ia]
+        jb = body_idx[ib]
+        keep = (ja != im) & (jb != im)
+        ia, ib, ja, jb = ia[keep], ib[keep], ja[keep], jb[keep]
+        aval = a_mat[ia, ib].astype(np.float32)
+        chunks_ia.append(ja)
+        chunks_ib.append(jb)
+        chunks_im.append(np.full(len(ja), im, dtype=np.int32))
+        chunks_a.append(aval)
         if gt_eps is not None:
-            gst = eval_triple(gt_eps[ja], gt_eps[im], gt_eps[jb], xi, z_grid, temperature_k)
-            row["A_gt_zj"] = gst["A_nonret_zj"]
-            row["kind_gt"] = gst["kind"]
-            row["gt_agrees"] = (stats["A_nonret_zj"] < 0) and (gst["A_nonret_zj"] < 0)
-        hits.append(row)
-    return hits, n_checked, vacuum_n_rep, len(candidates)
+            gt_mat = hamaker_matrix(gt_eps[body_idx], gt_eps[im], temperature_k)
+            chunks_gt.append(gt_mat[ia, ib].astype(np.float32))
+            del gt_mat
+        del a_mat
+
+    if chunks_a:
+        ia_all = np.concatenate(chunks_ia)
+        ib_all = np.concatenate(chunks_ib)
+        im_all = np.concatenate(chunks_im)
+        a_all = np.concatenate(chunks_a)
+        gt_all = np.concatenate(chunks_gt) if chunks_gt else None
+    else:
+        ia_all = np.zeros(0, dtype=np.int32)
+        ib_all = np.zeros(0, dtype=np.int32)
+        im_all = np.zeros(0, dtype=np.int32)
+        a_all = np.zeros(0, dtype=np.float32)
+        gt_all = None if gt_eps is None else np.zeros(0, dtype=np.float32)
+
+    n_repulsive = int(a_all.size)
+    hits = []
+    if n_repulsive and top_k > 0:
+        k = min(int(top_k), n_repulsive)
+        order = np.argpartition(a_all, k - 1)[:k]
+        order = order[np.argsort(a_all[order])]
+        for t in order:
+            ja, jb, im = int(ia_all[t]), int(ib_all[t]), int(im_all[t])
+            stats = eval_triple(eps[ja], eps[im], eps[jb], xi, z_grid, temperature_k)
+            row = {"A": names[ja], "medium": names[im], "B": names[jb], **stats}
+            if gt_eps is not None:
+                gst = eval_triple(gt_eps[ja], gt_eps[im], gt_eps[jb], xi, z_grid, temperature_k)
+                row["A_gt_zj"] = gst["A_nonret_zj"]
+                row["kind_gt"] = gst["kind"]
+                row["gt_agrees"] = (stats["A_nonret_zj"] < 0) and (gst["A_nonret_zj"] < 0)
+            hits.append(row)
+    pairs = {"ia": ia_all, "ib": ib_all, "im": im_all, "A_nr_zj": a_all}
+    if gt_all is not None:
+        pairs["A_gt_zj"] = gt_all
+    return hits, n_checked, vacuum_n_rep, n_repulsive, pairs
 
 
 def print_table(hits, z_grid):
@@ -408,6 +520,63 @@ def plot_force_vs_z(named, library, xi, temperature_k, out_path):
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
+
+
+def write_materials_csv(path, names, metas, eps, builtin_set):
+    cols = [
+        "idx", "name", "jid", "mpid", "formula", "n_atoms", "n_elements",
+        "volume_A3", "density_n_per_A3", "density_g_cm3", "opt_gap", "mbj_gap",
+        "eps_xi0", "builtin",
+    ]
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(cols)
+        for i, (name, meta) in enumerate(zip(names, metas)):
+            w.writerow(
+                [
+                    i,
+                    name,
+                    meta["jid"],
+                    meta["mpid"],
+                    meta["formula"],
+                    meta["n_atoms"],
+                    meta["n_elements"],
+                    meta["volume_A3"],
+                    meta["density_n_per_A3"],
+                    meta["density_g_cm3"],
+                    meta["opt_gap"],
+                    meta["mbj_gap"],
+                    float(eps[i, 0]),
+                    name in builtin_set,
+                ]
+            )
+
+
+def write_pairs_npz(path, names, metas, xi, eps, gt_eps, pairs):
+    payload = {
+        "names": np.asarray(names),
+        "xi": np.asarray(xi, dtype=np.float64),
+        "eps": np.asarray(eps, dtype=np.float32),
+        "ia": pairs["ia"],
+        "ib": pairs["ib"],
+        "im": pairs["im"],
+        "A_nr_zj": pairs["A_nr_zj"],
+        "jid": np.asarray([m["jid"] for m in metas]),
+        "mpid": np.asarray([m["mpid"] for m in metas]),
+        "formula": np.asarray([m["formula"] for m in metas]),
+        "n_atoms": np.asarray([m["n_atoms"] for m in metas], dtype=np.float32),
+        "n_elements": np.asarray([m["n_elements"] for m in metas], dtype=np.float32),
+        "volume_A3": np.asarray([m["volume_A3"] for m in metas], dtype=np.float32),
+        "density_n_per_A3": np.asarray([m["density_n_per_A3"] for m in metas], dtype=np.float32),
+        "density_g_cm3": np.asarray([m["density_g_cm3"] for m in metas], dtype=np.float32),
+        "opt_gap": np.asarray([m["opt_gap"] for m in metas], dtype=np.float32),
+        "mbj_gap": np.asarray([m["mbj_gap"] for m in metas], dtype=np.float32),
+    }
+    if "A_gt_zj" in pairs:
+        payload["A_gt_zj"] = pairs["A_gt_zj"]
+    if gt_eps is not None:
+        payload["eps_gt"] = np.asarray(gt_eps, dtype=np.float32)
+    np.savez(path, **payload)
 
 
 def parse_name_list(s, available, builtins=None, crystals=None):
@@ -494,6 +663,16 @@ def main():
     parser.add_argument("--top_k", type=int, default=40)
     parser.add_argument("--out_json", default="repulsive_lifshitz.json")
     parser.add_argument("--out_csv", default="repulsive_lifshitz.csv")
+    parser.add_argument(
+        "--out_pairs",
+        default="repulsive_lifshitz_pairs.npz",
+        help="All A_nr<0 pairs (ia,ib,im,A_nr). Empty string to skip",
+    )
+    parser.add_argument(
+        "--out_materials",
+        default="repulsive_lifshitz_materials.csv",
+        help="One row per material (density, n_atoms, eps(0), ...). Empty string to skip",
+    )
     parser.add_argument("--plot", default="repulsive_lifshitz_F_vs_z.png")
     args = parser.parse_args()
 
@@ -510,6 +689,7 @@ def main():
     names = list(BUILTIN_NAMES)
     eps_list = [builtin_eps_fn(n)(xi) for n in names]
     gt_list = [e.copy() for e in eps_list]
+    metas = [builtin_meta(n) for n in names]
     builtin_set = set(BUILTIN_NAMES)
     model_meta = None
 
@@ -546,11 +726,12 @@ def main():
         else:
             indices = list(get_split_indices(ckpt, len(dataset), args.split))
         n_split = len(indices)
-        indices, n_skip_atoms, n_skip_elem = filter_crystal_indices(
+        indices, crystal_metas, n_skip_atoms, n_skip_elem = filter_crystal_indices(
             dataset, indices, args.min_atoms, drop_elemental=not args.keep_elemental,
         )
         if args.limit is not None:
             indices = indices[: args.limit]
+            crystal_metas = crystal_metas[: args.limit]
         print(
             f"  type={model_type}  use_log={use_log}  split={args.split}  "
             f"n={len(indices)}/{n_split}  ξ_KKR={dataset.n_frequencies}"
@@ -572,6 +753,7 @@ def main():
         names.extend(cnames)
         eps_list.extend(list(pred_m))
         gt_list.extend(list(gt_m))
+        metas.extend(crystal_metas)
         model_meta = {
             "model_path": args.model_path,
             "model_type": model_type,
@@ -590,7 +772,7 @@ def main():
         if not path.is_file():
             raise SystemExit(f"LMDB not found: {path}")
         print(f"Loading DFT-KKR crystals from {path} ...")
-        cnames, ceps = load_lmdb_eps(
+        cnames, ceps, crystal_metas = load_lmdb_eps(
             path, xi, limit=args.limit,
             min_atoms=args.min_atoms, drop_elemental=not args.keep_elemental,
         )
@@ -598,9 +780,10 @@ def main():
         names.extend(cnames)
         eps_list.extend(list(ceps))
         gt_list.extend(list(ceps))
+        metas.extend(crystal_metas)
 
     eps = np.stack(eps_list, axis=0)
-    gt_eps = np.stack(gt_list, axis=0) if args.compare_gt else None
+    gt_eps = np.stack(gt_list, axis=0)
     name_to_i = {n: i for i, n in enumerate(names)}
     crystal_names = [n for n in names if n not in builtin_set]
 
@@ -636,7 +819,7 @@ def main():
         "Vacuum gap: ε_m=1 ≤ ε_A, ε_B for all passive materials → no planar repulsion."
     )
 
-    hits, n_checked, vacuum_n_rep, n_repulsive = search_pairs(
+    hits, n_checked, vacuum_n_rep, n_repulsive, pairs = search_pairs(
         names, eps, media_idx, body_idx, xi, z_grid, args.temperature_k, args.top_k,
         gt_eps=gt_eps,
     )
@@ -648,7 +831,7 @@ def main():
     )
     if "vacuum" in media_names:
         print(f"Vacuum as medium: {vacuum_n_rep} repulsive pairs (expected 0).")
-    if args.compare_gt and hits:
+    if hits:
         n_agree = sum(1 for h in hits if h.get("gt_agrees"))
         print(f"GT agreement among shown hits: {n_agree}/{len(hits)} also A_gt<0")
 
@@ -731,6 +914,16 @@ def main():
                 + list(h["F_kn_m2"])
             )
     print(f"\nWrote {args.out_json} and {args.out_csv}")
+
+    if len(metas) != len(names):
+        raise SystemExit(f"internal error: {len(metas)} metas vs {len(names)} names")
+    if args.out_materials:
+        write_materials_csv(args.out_materials, names, metas, eps, builtin_set)
+        print(f"Wrote {args.out_materials}  ({len(names)} materials)")
+    if args.out_pairs:
+        print(f"Writing all {n_repulsive} A_nr<0 pairs to {args.out_pairs} ...")
+        write_pairs_npz(args.out_pairs, names, metas, xi, eps, gt_eps, pairs)
+        print(f"Wrote {args.out_pairs}")
 
     if args.plot:
         plot_force_vs_z(demo, lib, xi, args.temperature_k, args.plot)
