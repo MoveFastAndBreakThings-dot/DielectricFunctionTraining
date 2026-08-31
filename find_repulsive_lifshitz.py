@@ -19,15 +19,16 @@ Built-in ε(iξ): Ninham–Parsegian oscillators from van Zwol & Palasantzas,
 Phys. Rev. A 81, 062502 (2010), plus a Drude gold.
 
 Primary use is a trained FrequencyCGCNN / MACE checkpoint: predict ε_xx(iξ)
-for crystals, then screen A|medium|B. Media default to the builtin liquids;
-bodies default to predicted crystals + gold (classic high-ε partner).
+for crystals, then screen A|medium|B. Media default to bromobenzene and
+diiodomethane (high-n Casimir liquids). Bodies default to predicted crystals
++ gold, after dropping 1-atom and single-element JARVIS cells.
 
 Usage:
   python find_repulsive_lifshitz.py \\
       --model_path models_latest_opt/cgcnn_kkr_latest_opt.pt \\
       --lmdb_path latest_data_opt/crystal_graphs.lmdb
   python find_repulsive_lifshitz.py --model_path ... --lmdb_path ... \\
-      --media bromobenzene,diiodomethane --bodies crystals,gold --compare_gt
+      --media bromobenzene,diiodomethane,benzene --bodies crystals,gold --compare_gt
   python find_repulsive_lifshitz.py --media vacuum --bodies gold,silica,PTFE
 """
 
@@ -37,6 +38,7 @@ import argparse
 import csv
 import json
 import pickle
+import re
 from pathlib import Path
 
 import lmdb
@@ -147,6 +149,20 @@ def builtin_eps_fn(name):
 
 
 BUILTIN_NAMES = ("vacuum", "gold") + tuple(_OSC.keys())
+DEFAULT_MEDIA = "bromobenzene,diiodomethane"
+_ELEMENT_RE = re.compile(r"[A-Z][a-z]?")
+
+
+def formula_n_elements(formula):
+    return len(set(_ELEMENT_RE.findall(formula or "")))
+
+
+def keep_crystal(formula, n_atoms, min_atoms, drop_elemental):
+    if int(n_atoms) < min_atoms:
+        return False
+    if drop_elemental and formula_n_elements(formula) < 2:
+        return False
+    return True
 
 
 def matsubara_xi(n_max, temperature_k=T_K):
@@ -164,28 +180,55 @@ def interpolate_eps(xi_src, eps_src, xi_query):
     return out
 
 
-def load_lmdb_eps(lmdb_path, xi_query, limit=None):
+def load_lmdb_eps(lmdb_path, xi_query, limit=None, min_atoms=2, drop_elemental=True):
     env = lmdb.open(str(lmdb_path), readonly=True, lock=False, subdir=False)
     names, stack = [], []
+    n_skip = 0
     with env.begin() as txn:
         meta = pickle.loads(txn.get(b"__metadata__"))
         n = int(meta["total_samples"])
-        if limit is not None:
-            n = min(n, int(limit))
         for i in range(n):
             rec = pickle.loads(txn.get(f"{i}".encode("utf-8")))
             kkr = rec.get("kkr_targets") or {}
             if "kkr_xx" not in kkr or rec.get("kkr_xi") is None:
                 continue
-            eps = interpolate_eps(rec["kkr_xi"], kkr["kkr_xx"], xi_query)
             formula = rec.get("formula") or ""
+            n_atoms = rec.get("n_atoms")
+            if n_atoms is None:
+                n_atoms = len(rec.get("atomic_numbers") or rec.get("atom_fea") or [])
+            if not keep_crystal(formula, n_atoms, min_atoms, drop_elemental):
+                n_skip += 1
+                continue
+            eps = interpolate_eps(rec["kkr_xi"], kkr["kkr_xx"], xi_query)
             jid = rec.get("jid") or f"idx{i}"
             names.append(f"{jid}:{formula}".strip(":"))
             stack.append(eps)
+            if limit is not None and len(stack) >= int(limit):
+                break
     env.close()
+    if n_skip:
+        print(f"  dropped {n_skip} 1-atom/elemental cells")
     if not stack:
         return names, np.zeros((0, len(xi_query)))
     return names, np.stack(stack, axis=0)
+
+
+def filter_crystal_indices(dataset, indices, min_atoms, drop_elemental):
+    kept = []
+    n_skip_atoms = 0
+    n_skip_elem = 0
+    for i in indices:
+        info = dataset.get_sample_info(i)
+        n_atoms = int(info.get("n_atoms") or 0)
+        formula = info.get("formula") or ""
+        if n_atoms < min_atoms:
+            n_skip_atoms += 1
+            continue
+        if drop_elemental and formula_n_elements(formula) < 2:
+            n_skip_elem += 1
+            continue
+        kept.append(i)
+    return kept, n_skip_atoms, n_skip_elem
 
 
 def crystal_label(dataset, idx):
@@ -425,12 +468,23 @@ def main():
     parser.add_argument(
         "--media",
         default=None,
-        help="Comma list, or all/builtins/crystals. Default: builtins",
+        help="Comma list, or all/builtins/crystals. Default: bromobenzene,diiodomethane",
     )
     parser.add_argument(
         "--bodies",
         default=None,
         help="Comma list, or all/builtins/crystals. Default with model: crystals,gold",
+    )
+    parser.add_argument(
+        "--min_atoms",
+        type=int,
+        default=2,
+        help="Drop crystals with fewer atoms in the cell (default: 2, i.e. no 1-atom cells)",
+    )
+    parser.add_argument(
+        "--keep_elemental",
+        action="store_true",
+        help="Keep single-element crystals (He, Na, Si, ...). Default is to drop them",
     )
     parser.add_argument(
         "--crystals_as_media",
@@ -446,7 +500,7 @@ def main():
     if args.model_path and not args.lmdb_path:
         raise SystemExit("--lmdb_path is required with --model_path")
     if args.media is None:
-        args.media = "builtins"
+        args.media = DEFAULT_MEDIA
     if args.bodies is None:
         args.bodies = "crystals,gold" if args.model_path else "all"
 
@@ -491,12 +545,23 @@ def main():
             indices = list(range(len(dataset)))
         else:
             indices = list(get_split_indices(ckpt, len(dataset), args.split))
+        n_split = len(indices)
+        indices, n_skip_atoms, n_skip_elem = filter_crystal_indices(
+            dataset, indices, args.min_atoms, drop_elemental=not args.keep_elemental,
+        )
         if args.limit is not None:
             indices = indices[: args.limit]
         print(
             f"  type={model_type}  use_log={use_log}  split={args.split}  "
-            f"n={len(indices)}  ξ_KKR={dataset.n_frequencies}"
+            f"n={len(indices)}/{n_split}  ξ_KKR={dataset.n_frequencies}"
         )
+        if n_skip_atoms or n_skip_elem:
+            print(
+                f"  dropped {n_skip_atoms} with n_atoms<{args.min_atoms}, "
+                f"{n_skip_elem} elemental"
+            )
+        if not indices:
+            raise SystemExit("No crystals left after 1-atom/elemental filter.")
         cnames, pred_kkr, gt_kkr = predict_model_eps(
             model, model_type, dataset, indices, device, use_log, args.batch_size,
         )
@@ -513,6 +578,11 @@ def main():
             "use_log": use_log,
             "split": args.split,
             "n_crystals": len(cnames),
+            "n_split": n_split,
+            "n_dropped_atoms": n_skip_atoms,
+            "n_dropped_elemental": n_skip_elem,
+            "min_atoms": args.min_atoms,
+            "drop_elemental": not args.keep_elemental,
             "lmdb_path": str(lmdb_path),
         }
     elif args.lmdb_path:
@@ -520,7 +590,10 @@ def main():
         if not path.is_file():
             raise SystemExit(f"LMDB not found: {path}")
         print(f"Loading DFT-KKR crystals from {path} ...")
-        cnames, ceps = load_lmdb_eps(path, xi, limit=args.limit)
+        cnames, ceps = load_lmdb_eps(
+            path, xi, limit=args.limit,
+            min_atoms=args.min_atoms, drop_elemental=not args.keep_elemental,
+        )
         print(f"  {len(cnames)} crystals with KKR ε_xx")
         names.extend(cnames)
         eps_list.extend(list(ceps))
@@ -552,6 +625,10 @@ def main():
     print(f"  T={args.temperature_k} K   n_matsubara={args.n_matsubara}   z={list(z_grid)} nm")
     print(f"  media ({len(media_idx)}): {', '.join(media_names)}")
     print(f"  bodies ({len(body_idx)}): {n_body_builtin} builtin + {n_body_crystal} crystals")
+    print(
+        f"  crystal filter: min_atoms={args.min_atoms}  "
+        f"drop_elemental={not args.keep_elemental}"
+    )
     print("=" * 72)
     print(
         "\nDistance: |F| always falls with z (∼z⁻³ non-retarded, faster when retarded).\n"
