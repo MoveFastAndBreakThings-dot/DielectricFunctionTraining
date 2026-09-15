@@ -95,7 +95,7 @@ def main():
     parser = argparse.ArgumentParser(description="Random official-MACE ε(iξ) plots vs GT")
     parser.add_argument("--mace", default="models_latest_opt/mace_kkr_latest_opt.pt")
     parser.add_argument("--lmdb_path", default="latest_data_opt/crystal_graphs.lmdb")
-    parser.add_argument("--split", default="all", choices=("all", "train", "val", "test"))
+    parser.add_argument("--split", default="test", choices=("all", "train", "val", "test"))
     parser.add_argument("--n", type=int, default=2000, help="Number of random crystals to plot")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch_size", type=int, default=8)
