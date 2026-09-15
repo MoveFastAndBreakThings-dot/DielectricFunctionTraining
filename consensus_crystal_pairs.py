@@ -8,7 +8,6 @@ bodies are JARVIS crystals. Liquids are van Zwol oscillators. No gold.
   python consensus_crystal_pairs.py \\
       --lmdb_path latest_data_opt/crystal_graphs.lmdb \\
       --model models_latest_opt/cgcnn_kkr_latest_opt.pt \\
-      --model models_latest_opt/mace_kkr_latest_opt.pt \\
       --tsenn models_latest_opt/tsenn_kkr_xx_latest_opt_best.torch \\
       --min_density 2 --min_atoms 4
 """
