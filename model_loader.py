@@ -97,6 +97,9 @@ def load_model(checkpoint, device):
     Returns (model, model_type) where model_type is ``"CGCNN"`` or ``"MACE"``.
     """
     model_type = checkpoint.get("model_type", "CGCNN")
+    if model_type == "MACE" and checkpoint.get("n_knots"):
+        from train_mace_spline import load_spline_mace
+        return load_spline_mace(checkpoint, device)
     if model_type == "MACE":
         return _load_official_mace(checkpoint, device)
     return _load_cgcnn(checkpoint, device)
